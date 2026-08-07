@@ -14,7 +14,7 @@ st.set_page_config(page_title="통역 졸업시험 플래너", page_icon="🎧",
 db.init_db()
 _component_dir = Path(__file__).with_name("script_highlighter")
 script_highlighter_component = (
-    components.declare_component("script_highlighter_inline_v5", path=str(_component_dir))
+    components.declare_component("script_highlighter_inline_v6", path=str(_component_dir))
     if _component_dir.is_dir() else None
 )
 
