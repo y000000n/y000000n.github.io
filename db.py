@@ -16,6 +16,19 @@ _SUPABASE = None
 _REMOTE_CHECKED = False
 
 
+def _normalize_supabase_url(value: str) -> str:
+    url = str(value or "").strip().strip('"').strip("'").rstrip("/")
+    if url.endswith("/rest/v1"):
+        url = url[:-8].rstrip("/")
+    if "://" not in url:
+        if "." not in url and "/" not in url:
+            url = f"{url}.supabase.co"
+        url = f"https://{url}"
+    if not url.startswith(("https://", "http://")):
+        raise ValueError("SUPABASE_URL 형식이 올바르지 않습니다. Project URL을 https://로 시작하게 입력하세요.")
+    return url
+
+
 class _Result:
     def __init__(self, data): self.data = data
 
@@ -76,7 +89,7 @@ def _remote_client():
         except Exception:
             pass
     if url and key:
-        _SUPABASE = _RestClient(url, key)
+        _SUPABASE = _RestClient(_normalize_supabase_url(url), str(key).strip())
     return _SUPABASE
 
 
