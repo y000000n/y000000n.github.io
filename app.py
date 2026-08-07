@@ -14,7 +14,7 @@ st.set_page_config(page_title="통역 졸업시험 플래너", page_icon="🎧",
 db.init_db()
 _component_dir = Path(__file__).with_name("script_highlighter_v8")
 script_highlighter_component = (
-    components.declare_component("script_highlighter_inline_v8", path=str(_component_dir))
+    components.declare_component("script_highlighter_inline_v9", path=str(_component_dir))
     if _component_dir.is_dir() else None
 )
 
@@ -122,6 +122,20 @@ def dashboard():
             row[f"{day.strftime('%m/%d')}\n{'월화수목금토일'[day.weekday()]}"] = "✅" if amount >= 10 else (f"{amount}분" if amount else "—")
         table.append(row)
     st.dataframe(table, use_container_width=True, hide_index=True)
+    st.subheader("이번 주 시역 실천표")
+    sight_events = db.sight_translation_events(week_days[0].isoformat(), week_days[-1].isoformat())
+    today_sight_cols = st.columns(2)
+    for col, direction in zip(today_sight_cols, ("KO→JA", "JA→KO")):
+        today_count = sum(1 for e in sight_events if str(e["practice_date"])[:10] == date.today().isoformat() and e["direction"] == direction)
+        col.metric(f"오늘 {direction} 시역", f"{today_count} / 7회", "목표 달성" if today_count >= 7 else f"{7-today_count}회 남음")
+    sight_table = []
+    for direction in ("KO→JA", "JA→KO"):
+        row = {"시역 방향": direction}
+        for day in week_days:
+            count = sum(1 for e in sight_events if str(e["practice_date"])[:10] == day.isoformat() and e["direction"] == direction)
+            row[f"{day.strftime('%m/%d')}\n{'월화수목금토일'[day.weekday()]}"] = "✅" if count >= 7 else f"{count}/7"
+        sight_table.append(row)
+    st.dataframe(sight_table, use_container_width=True, hide_index=True)
     st.subheader("최근 공부 메모")
     recent_notes = db.all_notes()[:3]
     if recent_notes:
@@ -150,11 +164,12 @@ def dashboard():
 
 
 def practice():
-    hero("연습", "동시통역·순차통역·시역·섀도잉 연습과 셀프피드백을 기록하세요.")
+    hero("통역 연습", "동시통역·순차통역·섀도잉 연습과 셀프피드백을 기록하세요.")
     with st.form("practice", clear_on_submit=True):
         c1, c2, c3 = st.columns(3)
         day = c1.date_input("날짜", date.today())
-        activity_label = c2.selectbox("연습 유형", list(ACTIVITY_LABELS.values()))
+        practice_types = {k:v for k,v in ACTIVITY_LABELS.items() if k != "sight_translation"}
+        activity_label = c2.selectbox("연습 유형", list(practice_types.values()))
         activity_type = next(k for k, v in ACTIVITY_LABELS.items() if v == activity_label)
         direction = c3.segmented_control("방향", ["KO→JA", "JA→KO"], default="KO→JA")
         title = st.text_input("자료 제목 *", placeholder="예: 기후변화 정상회의 연설 또는 시역 기사 제목")
@@ -187,6 +202,20 @@ def practice():
         raw_rows = db.recent_practices(20)
         fields = [(x,y) for x,y in [("practice_date","날짜"),("activity_type","연습 유형"),("direction","방향"),("title","자료 제목"),("topic","주제"),("source_url","URL"),("video_speed","속도"),("minutes","분"),("difficulty","난이도"),("omission","내용 누락"),("number_omission","숫자 누락"),("logic_error","논리 오류"),("expression_block","표현 막힘"),("unnatural_expression","부자연스러운 표현"),("other_notes","메모")]]
         for r in raw_rows: edit_button("practices", r, fields, f"{r['practice_date']} · {ACTIVITY_LABELS.get(r['activity_type'])} {r['direction']} · {r['title']}", f"practice_{r['id']}")
+    st.divider()
+    st.subheader("오늘의 시역")
+    st.caption("기사를 한 편 시역할 때마다 버튼을 누르세요. 방향별 하루 목표는 7회입니다.")
+    today_sight = db.sight_translation_events(date.today().isoformat(), date.today().isoformat())
+    cols = st.columns(2)
+    for col, direction in zip(cols, ("KO→JA", "JA→KO")):
+        count = sum(1 for e in today_sight if e["direction"] == direction)
+        with col.container(border=True):
+            st.markdown(f"### {direction} 시역")
+            st.metric("오늘 횟수", f"{count} / 7회")
+            st.progress(min(count / 7, 1.0))
+            if st.button(f"{direction} 시역 +1", type="primary", use_container_width=True, key=f"sight_{direction}"):
+                db.add_sight_translation(direction)
+                st.rerun()
 
 
 def language_pairs():
@@ -402,7 +431,7 @@ def records_manager():
                 st.rerun()
 
 
-pages = {"대시보드": dashboard, "연습": practice, "언어쌍": language_pairs, "리뷰": review, "스크립트 피드백": script_feedback, "스크립트 복습": script_review, "공부 메모": study_notes, "통계": statistics}
+pages = {"대시보드": dashboard, "통역 연습": practice, "언어쌍": language_pairs, "리뷰": review, "스크립트 피드백": script_feedback, "스크립트 복습": script_review, "공부 메모": study_notes, "통계": statistics}
 st.sidebar.title("🎧 통역 플래너")
 st.sidebar.caption(f"저장소 · {db.backend_name()}")
 selection = st.sidebar.radio("메뉴", list(pages), label_visibility="collapsed")

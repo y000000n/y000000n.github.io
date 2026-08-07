@@ -183,6 +183,12 @@ def init_db(db_path: Path | str = DB_PATH) -> None:
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
+            CREATE TABLE IF NOT EXISTS sight_translation_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                practice_date TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
             """
         )
         practice_columns = {row["name"] for row in conn.execute("PRAGMA table_info(practices)")}
@@ -392,6 +398,24 @@ def all_script_reviews():
     remote = _remote_client()
     if remote: return remote.table("script_reviews").select("*").order("id", desc=True).execute().data
     return query("SELECT * FROM script_reviews ORDER BY id DESC")
+
+
+def add_sight_translation(direction: str, practice_date: str | None = None, db_path: Path | str = DB_PATH) -> int:
+    payload = {"practice_date": practice_date or date.today().isoformat(), "direction": direction}
+    remote = _remote_client()
+    if remote: return remote.table("sight_translation_events").insert(payload).execute().data[0]["id"]
+    return execute("INSERT INTO sight_translation_events(practice_date,direction) VALUES(?,?)", (payload["practice_date"],direction), db_path)
+
+
+def sight_translation_events(start: str, end: str | None = None, db_path: Path | str = DB_PATH):
+    remote = _remote_client()
+    if remote:
+        q = remote.table("sight_translation_events").select("*").gte("practice_date", start)
+        if end: q = q.lte("practice_date", end)
+        return q.execute().data
+    sql="SELECT * FROM sight_translation_events WHERE practice_date>=?"; params=[start]
+    if end: sql+=" AND practice_date<=?"; params.append(end)
+    return query(sql, params, db_path=db_path)
 
 
 EDITABLE_COLUMNS = {
