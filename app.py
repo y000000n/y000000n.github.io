@@ -178,12 +178,15 @@ def practice():
                     st.success("연습 기록을 저장했습니다.")
     st.subheader("최근 기록")
     rows = [{"날짜":r["practice_date"], "연습유형":ACTIVITY_LABELS.get(r["activity_type"], r["activity_type"]), "방향":r["direction"], "자료":r["title"], "주제":r["topic"], "URL":r.get("source_url", ""), "속도":f"×{r.get('video_speed',1.0):.2f}" if r["activity_type"]=="simultaneous" else "—", "분":r["minutes"], "난이도":r["difficulty"]} for r in db.recent_practices(20)]
-    st.dataframe(rows, use_container_width=True, hide_index=True) if rows else st.info("아직 연습 기록이 없습니다.")
     if rows:
-        with st.expander("연습 기록 수정"):
-            raw_rows = db.recent_practices(20)
-            fields = [(x,y) for x,y in [("practice_date","날짜"),("activity_type","연습 유형"),("direction","방향"),("title","자료 제목"),("topic","주제"),("source_url","URL"),("video_speed","속도"),("minutes","분"),("difficulty","난이도"),("omission","내용 누락"),("number_omission","숫자 누락"),("logic_error","논리 오류"),("expression_block","표현 막힘"),("unnatural_expression","부자연스러운 표현"),("other_notes","메모")]]
-            for r in raw_rows: edit_button("practices", r, fields, f"{r['practice_date']} · {ACTIVITY_LABELS.get(r['activity_type'])} {r['direction']} · {r['title']}", f"practice_{r['id']}")
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+    else:
+        st.info("아직 연습 기록이 없습니다.")
+    if rows:
+        st.markdown("#### 기록별 수정")
+        raw_rows = db.recent_practices(20)
+        fields = [(x,y) for x,y in [("practice_date","날짜"),("activity_type","연습 유형"),("direction","방향"),("title","자료 제목"),("topic","주제"),("source_url","URL"),("video_speed","속도"),("minutes","분"),("difficulty","난이도"),("omission","내용 누락"),("number_omission","숫자 누락"),("logic_error","논리 오류"),("expression_block","표현 막힘"),("unnatural_expression","부자연스러운 표현"),("other_notes","메모")]]
+        for r in raw_rows: edit_button("practices", r, fields, f"{r['practice_date']} · {ACTIVITY_LABELS.get(r['activity_type'])} {r['direction']} · {r['title']}", f"practice_{r['id']}")
 
 
 def language_pairs():
@@ -214,9 +217,9 @@ def language_pairs():
     if rows:
         shown = [{"한국어":r["korean"], "일본어":r["japanese"], "유형":TYPE_LABELS[r["pair_type"]], "출처":r["source"], "숙지도":"★"*r["mastery"], "복습":r["review_count"]} for r in rows]
         st.dataframe(shown, use_container_width=True, hide_index=True)
-        with st.expander("언어쌍 수정"):
-            fields = [("korean","한국어"),("japanese","일본어"),("pair_type","유형"),("source","출처"),("notes","메모"),("mastery","숙지도")]
-            for r in rows: edit_button("language_pairs", r, fields, f"{r['korean']} → {r['japanese']}", f"pair_{r['id']}")
+        st.markdown("#### 기록별 수정")
+        fields = [("korean","한국어"),("japanese","일본어"),("pair_type","유형"),("source","출처"),("notes","메모"),("mastery","숙지도")]
+        for r in rows: edit_button("language_pairs", r, fields, f"{r['korean']} → {r['japanese']}", f"pair_{r['id']}")
     else: st.info("조건에 맞는 언어쌍이 없습니다.")
 
 
@@ -258,10 +261,10 @@ def study_notes():
     notes = db.find_notes(keyword)
     if notes:
         for note in notes:
+            edit_button("study_notes", note, [("note_date","날짜"),("title","제목"),("content","내용"),("tags","태그")], f"{note['note_date']} · {note['title']}", f"note_{note['id']}")
             with st.expander(f"{note['note_date']} · {note['title']}"):
                 st.write(note["content"])
                 if note["tags"]: st.caption(f"태그: {note['tags']}")
-                edit_button("study_notes", note, [("note_date","날짜"),("title","제목"),("content","내용"),("tags","태그")], "이 메모를 수정합니다.", f"note_{note['id']}")
     else:
         st.info("조건에 맞는 메모가 없습니다.")
 
@@ -311,9 +314,9 @@ def script_feedback():
         st.subheader("이번 분석 결과"); st.text(st.session_state["latest_script_feedback"])
     st.subheader("저장된 피드백")
     for item in db.all_script_feedbacks()[:20]:
+        edit_button("script_feedbacks", item, [("feedback_date","날짜"),("interpretation_type","통역 유형"),("direction","방향"),("title","제목"),("source_script","대상 스크립트"),("interpreted_script","실제 통역 스크립트"),("feedback","피드백")], f"{item['feedback_date']} · {item['interpretation_type']} {item['direction']} · {item['title']}", f"feedback_{item['id']}")
         with st.expander(f"{item['feedback_date']} · {item['interpretation_type']} {item['direction']} · {item['title']}"):
             st.text(item["feedback"])
-            edit_button("script_feedbacks", item, [("feedback_date","날짜"),("interpretation_type","통역 유형"),("direction","방향"),("title","제목"),("source_script","대상 스크립트"),("interpreted_script","실제 통역 스크립트"),("feedback","피드백")], "이 피드백 기록을 수정합니다.", f"feedback_{item['id']}")
 
 
 def script_review():
