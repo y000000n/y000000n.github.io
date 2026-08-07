@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+import re
 
 import pandas as pd
 import streamlit as st
@@ -19,6 +20,11 @@ st.markdown("""
   .hero p { margin:0; opacity:.85; }
   .card { background:white; border:1px solid #e8eaee; border-radius:14px; padding:20px; }
   .muted { color:#667085; font-size:.92rem; }
+  [data-testid="stSidebar"] div[role="radiogroup"] { gap:7px; }
+  [data-testid="stSidebar"] div[role="radiogroup"] label { padding:10px 12px; border-radius:10px; transition:.15s; }
+  [data-testid="stSidebar"] div[role="radiogroup"] label:hover { background:#e9eef8; }
+  [data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) { background:#315a9c; color:white; }
+  [data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) p { color:white; font-weight:700; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -123,6 +129,7 @@ def practice():
         c1, c2 = st.columns(2)
         minutes = c1.number_input("실제 연습시간(분)", 1, 300, 10)
         difficulty = c2.slider("체감 난이도", 1, 5, 3)
+        video_speed = st.select_slider("동영상 속도", options=[round(0.70 + i * 0.05, 2) for i in range(7)], value=1.0, format_func=lambda x: f"×{x:.2f}", help="동시통역 기록에만 저장됩니다.")
         st.markdown("#### 셀프피드백 오류 횟수")
         cols = st.columns(5)
         errors = {key: cols[i].number_input(label, 0, 999, 0, key=key) for i, (key, label) in enumerate(ERROR_LABELS.items())}
@@ -133,10 +140,10 @@ def practice():
                 if source_url.strip() and not source_url.strip().startswith(("http://", "https://")):
                     st.error("자료 URL은 http:// 또는 https://로 시작해야 합니다.")
                 else:
-                    db.add_practice({"practice_date": day.isoformat(), "activity_type": activity_type, "direction": direction, "title": title.strip(), "topic": topic.strip(), "source_url": source_url.strip() if activity_type in ("simultaneous", "consecutive", "sight_translation") else "", "minutes": minutes, "difficulty": difficulty, **errors, "other_notes": notes.strip()})
+                    db.add_practice({"practice_date": day.isoformat(), "activity_type": activity_type, "direction": direction, "title": title.strip(), "topic": topic.strip(), "source_url": source_url.strip() if activity_type in ("simultaneous", "consecutive", "sight_translation") else "", "video_speed": video_speed if activity_type == "simultaneous" else 1.0, "minutes": minutes, "difficulty": difficulty, **errors, "other_notes": notes.strip()})
                     st.success("연습 기록을 저장했습니다.")
     st.subheader("최근 기록")
-    rows = [{"날짜":r["practice_date"], "연습유형":ACTIVITY_LABELS.get(r["activity_type"], r["activity_type"]), "방향":r["direction"], "자료":r["title"], "주제":r["topic"], "URL":r.get("source_url", ""), "분":r["minutes"], "난이도":r["difficulty"]} for r in db.recent_practices(20)]
+    rows = [{"날짜":r["practice_date"], "연습유형":ACTIVITY_LABELS.get(r["activity_type"], r["activity_type"]), "방향":r["direction"], "자료":r["title"], "주제":r["topic"], "URL":r.get("source_url", ""), "속도":f"×{r.get('video_speed',1.0):.2f}" if r["activity_type"]=="simultaneous" else "—", "분":r["minutes"], "난이도":r["difficulty"]} for r in db.recent_practices(20)]
     st.dataframe(rows, use_container_width=True, hide_index=True) if rows else st.info("아직 연습 기록이 없습니다.")
 
 
@@ -216,6 +223,55 @@ def study_notes():
         st.info("조건에 맞는 메모가 없습니다.")
 
 
+def analyze_scripts(source: str, interpreted: str) -> str:
+    source_numbers = re.findall(r"\d+(?:[.,]\d+)*%?", source)
+    interpreted_numbers = re.findall(r"\d+(?:[.,]\d+)*%?", interpreted)
+    missing = [n for n in source_numbers if n not in interpreted_numbers]
+    source_len = len(re.sub(r"\s", "", source)); interpreted_len = len(re.sub(r"\s", "", interpreted))
+    ratio = interpreted_len / source_len if source_len else 0
+    source_sentences = len([x for x in re.split(r"[.!?。！？]+", source) if x.strip()])
+    output_sentences = len([x for x in re.split(r"[.!?。！？]+", interpreted) if x.strip()])
+    hesitations = len(re.findall(r"(?:^|\s)(음+|어+|えー+|あの)(?:\s|$)", interpreted))
+    notes = []
+    notes.append(f"숫자 보존: {len(source_numbers)-len(missing)}/{len(source_numbers)}개" if source_numbers else "숫자 보존: 원문에 숫자가 없습니다.")
+    if missing: notes.append("확인이 필요한 숫자: " + ", ".join(missing))
+    notes.append(f"통역문 분량: 원문의 약 {ratio*100:.0f}% (문자 수 기준)")
+    if ratio < .45: notes.append("분량이 짧아 핵심 내용 누락 여부를 문장별로 확인해보세요.")
+    elif ratio > 1.6: notes.append("통역문이 길어졌습니다. 반복 표현과 불필요한 설명을 줄일 수 있는지 확인해보세요.")
+    else: notes.append("전체 분량은 원문과 비교해 무리가 없는 범위입니다.")
+    notes.append(f"문장 단위: 원문 {source_sentences}개 / 통역문 {output_sentences}개")
+    notes.append(f"머뭇거림 표현 감지: {hesitations}회")
+    notes.append("※ 자동 평가는 숫자·분량·문장 구조 중심의 보조 분석입니다. 의미 정확성과 표현 자연스러움은 두 스크립트를 직접 대조해 최종 판단하세요.")
+    return "\n".join(f"• {x}" for x in notes)
+
+
+def script_feedback():
+    hero("스크립트 피드백", "원문과 실제 통역문을 비교해 기본 셀프피드백을 만들고 저장하세요.")
+    with st.form("script_feedback"):
+        a,b,c = st.columns(3)
+        feedback_date = a.date_input("날짜", date.today())
+        interpretation_type = b.selectbox("통역 유형", ["동시통역", "순차통역"])
+        direction = c.segmented_control("방향", ["KO→JA", "JA→KO"], default="KO→JA")
+        title = st.text_input("자료 제목 *")
+        left,right = st.columns(2)
+        source_script = left.text_area("통역 대상 스크립트 *", height=320)
+        interpreted_script = right.text_area("실제 통역 스크립트 *", height=320)
+        if st.form_submit_button("분석하고 저장", type="primary", use_container_width=True):
+            if not title.strip() or not source_script.strip() or not interpreted_script.strip():
+                st.error("제목과 두 스크립트를 모두 입력해주세요.")
+            else:
+                result = analyze_scripts(source_script, interpreted_script)
+                db.add_script_feedback({"feedback_date":feedback_date.isoformat(), "interpretation_type":interpretation_type, "direction":direction, "title":title.strip(), "source_script":source_script.strip(), "interpreted_script":interpreted_script.strip(), "feedback":result})
+                st.session_state["latest_script_feedback"] = result
+                st.success("분석 결과를 저장했습니다.")
+    if st.session_state.get("latest_script_feedback"):
+        st.subheader("이번 분석 결과"); st.text(st.session_state["latest_script_feedback"])
+    st.subheader("저장된 피드백")
+    for item in db.all_script_feedbacks()[:20]:
+        with st.expander(f"{item['feedback_date']} · {item['interpretation_type']} {item['direction']} · {item['title']}"):
+            st.text(item["feedback"])
+
+
 def statistics():
     hero("통계", "연습량과 반복되는 약점을 한눈에 확인하세요.")
     practices = pd.DataFrame(db.all_practices())
@@ -238,7 +294,7 @@ def statistics():
         st.subheader("신규 언어쌍 누적"); st.line_chart(daily)
 
 
-pages = {"대시보드": dashboard, "연습": practice, "언어쌍": language_pairs, "리뷰": review, "공부 메모": study_notes, "통계": statistics}
+pages = {"대시보드": dashboard, "연습": practice, "언어쌍": language_pairs, "리뷰": review, "스크립트 피드백": script_feedback, "공부 메모": study_notes, "통계": statistics}
 st.sidebar.title("🎧 통역 플래너")
 st.sidebar.caption(f"저장소 · {db.backend_name()}")
 selection = st.sidebar.radio("메뉴", list(pages), label_visibility="collapsed")
