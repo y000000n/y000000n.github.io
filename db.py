@@ -193,6 +193,8 @@ def init_db(db_path: Path | str = DB_PATH) -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 title TEXT NOT NULL,
                 content_html TEXT NOT NULL DEFAULT '',
+                language_direction TEXT NOT NULL DEFAULT '한일',
+                interpretation_mode TEXT NOT NULL DEFAULT '동시',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
@@ -207,6 +209,11 @@ def init_db(db_path: Path | str = DB_PATH) -> None:
             conn.execute("ALTER TABLE practices ADD COLUMN source_url TEXT DEFAULT ''")
         if "video_speed" not in practice_columns:
             conn.execute("ALTER TABLE practices ADD COLUMN video_speed REAL NOT NULL DEFAULT 1.0")
+        material_columns = {row["name"] for row in conn.execute("PRAGMA table_info(study_materials)")}
+        if "language_direction" not in material_columns:
+            conn.execute("ALTER TABLE study_materials ADD COLUMN language_direction TEXT NOT NULL DEFAULT '한일'")
+        if "interpretation_mode" not in material_columns:
+            conn.execute("ALTER TABLE study_materials ADD COLUMN interpretation_mode TEXT NOT NULL DEFAULT '동시'")
         defaults = {
             "exam_date": "2026-12-01",
             "weekly_ko_ja_goal": "70",
@@ -299,11 +306,11 @@ def add_script_feedback(values: dict, db_path: Path | str = DB_PATH) -> int:
     )
 
 
-def add_study_material(title: str, content_html: str, db_path: Path | str = DB_PATH) -> int:
-    payload = {"title": title, "content_html": content_html}
+def add_study_material(title: str, content_html: str, language_direction: str, interpretation_mode: str, db_path: Path | str = DB_PATH) -> int:
+    payload = {"title": title, "content_html": content_html, "language_direction": language_direction, "interpretation_mode": interpretation_mode}
     remote = _remote_client()
     if remote: return remote.table("study_materials").insert(payload).execute().data[0]["id"]
-    return execute("INSERT INTO study_materials(title,content_html) VALUES(?,?)", (title, content_html), db_path)
+    return execute("INSERT INTO study_materials(title,content_html,language_direction,interpretation_mode) VALUES(?,?,?,?)", (title, content_html, language_direction, interpretation_mode), db_path)
 
 
 def all_study_materials(db_path: Path | str = DB_PATH):
@@ -443,7 +450,7 @@ EDITABLE_COLUMNS = {
     "language_pairs": {"korean","japanese","pair_type","source","notes","mastery"},
     "study_notes": {"note_date","title","content","tags"},
     "script_feedbacks": {"feedback_date","interpretation_type","direction","title","source_script","interpreted_script","feedback"},
-    "study_materials": {"title","content_html"},
+    "study_materials": {"title","content_html","language_direction","interpretation_mode"},
     "script_reviews": {"title","script_text","highlights"},
     "settings": {"value"},
 }

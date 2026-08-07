@@ -43,6 +43,8 @@ st.markdown("""
   [data-testid="stSidebar"] div[role="radiogroup"] label:hover { background:#e9eef8; }
   [data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) { background:#315a9c; color:white; }
   [data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) p { color:white; font-weight:700; }
+  [data-testid="stSidebar"] div[role="radiogroup"] label > div:first-child { display:none; }
+  [data-testid="stSidebar"] div[role="radiogroup"] label { margin-left:0; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -559,41 +561,77 @@ def study_materials():
     if study_material_editor_component is None:
         st.error("공부 자료 편집기 파일이 없습니다. study_material_editor/index.html을 함께 업로드해주세요.")
         return
-    with st.expander("새 공부 자료 작성", expanded=not bool(db.all_study_materials())):
+    materials = db.all_study_materials()
+    page = st.session_state.get("material_page", "list")
+    selected_id = st.session_state.get("material_selected_id")
+
+    if page == "list":
+        st.subheader("자료 게시판")
+        st.session_state.setdefault("material_search", "")
+        st.session_state.setdefault("material_direction_filter", "전체")
+        st.session_state.setdefault("material_mode_filter", "전체")
+        keyword = st.session_state.get("material_search", "")
+        direction_filter = st.session_state.get("material_direction_filter", "전체")
+        mode_filter = st.session_state.get("material_mode_filter", "전체")
+        filtered = [m for m in materials if (not keyword or keyword.lower() in m["title"].lower() or keyword.lower() in str(m.get("content_html", "")).lower()) and (direction_filter == "전체" or m.get("language_direction", "한일") == direction_filter) and (mode_filter == "전체" or m.get("interpretation_mode", "동시") == mode_filter)]
+        if filtered:
+            header = st.columns([1,6,2,2,2])
+            for col, label in zip(header, ["번호","제목","언어 방향","통역 방식","작성일"]): col.caption(label)
+            for material in filtered:
+                cols = st.columns([1,6,2,2,2])
+                cols[0].write(material["id"])
+                if cols[1].button(material["title"], key=f"material_open_{material['id']}", type="tertiary"):
+                    st.session_state["material_selected_id"] = material["id"]; st.session_state["material_page"] = "view"; st.rerun()
+                cols[2].write(material.get("language_direction", "한일")); cols[3].write(material.get("interpretation_mode", "동시")); cols[4].write(str(material.get("created_at", ""))[:10])
+        else: st.info("조건에 맞는 게시글이 없습니다.")
+        st.divider()
+        bottom = st.columns([3,1.2,1.2,2,1])
+        bottom[0].text_input("검색", placeholder="제목·본문 검색", key="material_search", label_visibility="collapsed")
+        bottom[1].selectbox("언어 방향", ["전체","한일","일한"], key="material_direction_filter", label_visibility="collapsed")
+        bottom[2].selectbox("통역 방식", ["전체","순차","동시"], key="material_mode_filter", label_visibility="collapsed")
+        bottom[3].empty()
+        if bottom[4].button("게시글 작성", type="primary", key="material_write", use_container_width=True): st.session_state["material_page"] = "new"; st.rerun()
+        return
+
+    if page == "new":
+        if st.button("← 목록으로", key="material_new_back"): st.session_state["material_page"] = "list"; st.rerun()
+        st.subheader("게시글 작성")
         title = st.text_input("제목 *", key="material_new_title")
+        c1, c2 = st.columns(2)
+        language_direction = c1.segmented_control("언어 방향", ["한일","일한"], default="한일")
+        interpretation_mode = c2.segmented_control("통역 방식", ["순차","동시"], default="동시")
         revision = st.session_state.get("material_editor_revision", 0)
         content = study_material_editor_component(value="", key=f"material_new_editor_{revision}", default="")
         if st.button("게시글 저장", type="primary", use_container_width=True, key="material_create"):
             if not title.strip() or not str(content or "").strip(): st.error("제목과 내용을 입력해주세요.")
             else:
-                db.add_study_material(title.strip(), str(content))
-                st.session_state["material_editor_revision"] = revision + 1
-                st.success("공부 자료를 저장했습니다."); st.rerun()
-    materials = db.all_study_materials()
-    st.subheader("자료 게시판")
-    if not materials:
-        st.info("아직 저장한 공부 자료가 없습니다."); return
-    board = [{"번호":m["id"], "제목":m["title"], "작성일":str(m.get("created_at", ""))[:10]} for m in materials]
-    st.dataframe(board, use_container_width=True, hide_index=True)
-    selected_id = st.selectbox("열람할 자료", [m["id"] for m in materials], format_func=lambda i: next(m["title"] for m in materials if m["id"] == i))
-    item = next(m for m in materials if m["id"] == selected_id)
-    st.markdown(f"### {item['title']}")
-    st.caption(f"작성일 {str(item.get('created_at',''))[:10]}")
-    render_study_material(item.get("content_html", ""))
-    if st.button("이 게시글 수정", key=f"material_edit_open_{selected_id}"):
-        st.session_state["material_editing"] = selected_id
-    if st.session_state.get("material_editing") == selected_id:
-        with st.container(border=True):
-            edit_title = st.text_input("제목", value=item["title"], key=f"material_title_{selected_id}")
-            edit_content = study_material_editor_component(value=item.get("content_html", ""), key=f"material_editor_{selected_id}", default=item.get("content_html", ""))
-            save, cancel = st.columns(2)
-            if save.button("수정 저장", type="primary", use_container_width=True, key=f"material_save_{selected_id}"):
-                if not edit_title.strip() or not str(edit_content or "").strip(): st.error("제목과 내용을 입력해주세요.")
-                else:
-                    db.update_record("study_materials", selected_id, {"title":edit_title.strip(), "content_html":str(edit_content)})
-                    st.session_state["material_editing"] = None; st.rerun()
-            if cancel.button("취소", use_container_width=True, key=f"material_cancel_{selected_id}"):
-                st.session_state["material_editing"] = None; st.rerun()
+                new_id = db.add_study_material(title.strip(), str(content), language_direction, interpretation_mode)
+                st.session_state["material_editor_revision"] = revision + 1; st.session_state["material_selected_id"] = new_id; st.session_state["material_page"] = "view"; st.rerun()
+        return
+
+    item = next((m for m in materials if m["id"] == selected_id), None)
+    if not item: st.session_state["material_page"] = "list"; st.rerun()
+    if st.button("← 목록으로", key="material_view_back"): st.session_state["material_page"] = "list"; st.rerun()
+    if page == "view":
+        st.markdown(f"### {item['title']}")
+        st.caption(f"{item.get('language_direction','한일')} · {item.get('interpretation_mode','동시')} · 작성일 {str(item.get('created_at',''))[:10]}")
+        render_study_material(item.get("content_html", ""))
+        _, edit_col = st.columns([8,1])
+        if edit_col.button("수정", key=f"material_edit_open_{selected_id}", use_container_width=True): st.session_state["material_page"] = "edit"; st.rerun()
+        return
+    st.subheader("게시글 수정")
+    edit_title = st.text_input("제목", value=item["title"], key=f"material_title_{selected_id}")
+    c1, c2 = st.columns(2)
+    edit_direction = c1.segmented_control("언어 방향", ["한일","일한"], default=item.get("language_direction", "한일"), key=f"material_direction_{selected_id}")
+    edit_mode = c2.segmented_control("통역 방식", ["순차","동시"], default=item.get("interpretation_mode", "동시"), key=f"material_mode_{selected_id}")
+    edit_content = study_material_editor_component(value=item.get("content_html", ""), key=f"material_editor_{selected_id}", default=item.get("content_html", ""))
+    save, cancel = st.columns(2)
+    if save.button("수정 저장", type="primary", use_container_width=True, key=f"material_save_{selected_id}"):
+        if not edit_title.strip() or not str(edit_content or "").strip(): st.error("제목과 내용을 입력해주세요.")
+        else:
+            db.update_record("study_materials", selected_id, {"title":edit_title.strip(), "content_html":str(edit_content), "language_direction":edit_direction, "interpretation_mode":edit_mode})
+            st.session_state["material_page"] = "view"; st.rerun()
+    if cancel.button("취소", use_container_width=True, key=f"material_cancel_{selected_id}"): st.session_state["material_page"] = "view"; st.rerun()
 
 
 def statistics():
