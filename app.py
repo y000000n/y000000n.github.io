@@ -12,7 +12,11 @@ import db
 
 st.set_page_config(page_title="통역 졸업시험 플래너", page_icon="🎧", layout="wide")
 db.init_db()
-script_highlighter_component = components.declare_component("script_highlighter", path=str(Path(__file__).with_name("script_highlighter")))
+_component_dir = Path(__file__).with_name("script_highlighter")
+script_highlighter_component = (
+    components.declare_component("script_highlighter", path=str(_component_dir))
+    if _component_dir.is_dir() else None
+)
 
 st.markdown("""
 <style>
@@ -314,6 +318,9 @@ def script_feedback():
 
 def script_review():
     hero("스크립트 복습", "본문을 드래그해 하이라이트하고 선택한 부분 아래에 메모를 남기세요.")
+    if script_highlighter_component is None:
+        st.error("하이라이터 파일이 없습니다. GitHub에서 app.py와 같은 위치에 script_highlighter/index.html을 업로드해주세요.")
+        return
     with st.expander("새 복습 스크립트 추가", expanded=not bool(db.all_script_reviews())):
         with st.form("new_review_script", clear_on_submit=True):
             title = st.text_input("스크립트 제목 *")
