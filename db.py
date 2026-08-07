@@ -175,6 +175,14 @@ def init_db(db_path: Path | str = DB_PATH) -> None:
                 feedback TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
+            CREATE TABLE IF NOT EXISTS script_reviews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                script_text TEXT NOT NULL,
+                highlights TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
             """
         )
         practice_columns = {row["name"] for row in conn.execute("PRAGMA table_info(practices)")}
@@ -373,11 +381,25 @@ def all_script_feedbacks():
     return query("SELECT * FROM script_feedbacks ORDER BY feedback_date DESC,id DESC")
 
 
+def add_script_review(title: str, script_text: str, db_path: Path | str = DB_PATH) -> int:
+    payload = {"title": title, "script_text": script_text, "highlights": "[]"}
+    remote = _remote_client()
+    if remote: return remote.table("script_reviews").insert(payload).execute().data[0]["id"]
+    return execute("INSERT INTO script_reviews(title,script_text,highlights) VALUES(?,?,?)", (title,script_text,"[]"), db_path)
+
+
+def all_script_reviews():
+    remote = _remote_client()
+    if remote: return remote.table("script_reviews").select("*").order("id", desc=True).execute().data
+    return query("SELECT * FROM script_reviews ORDER BY id DESC")
+
+
 EDITABLE_COLUMNS = {
     "practices": {"practice_date","activity_type","direction","title","topic","source_url","video_speed","minutes","difficulty","omission","number_omission","logic_error","expression_block","unnatural_expression","other_notes"},
     "language_pairs": {"korean","japanese","pair_type","source","notes","mastery"},
     "study_notes": {"note_date","title","content","tags"},
     "script_feedbacks": {"feedback_date","interpretation_type","direction","title","source_script","interpreted_script","feedback"},
+    "script_reviews": {"title","script_text","highlights"},
     "settings": {"value"},
 }
 

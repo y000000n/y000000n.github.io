@@ -2,14 +2,17 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 import re
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 import db
 
 st.set_page_config(page_title="통역 졸업시험 플래너", page_icon="🎧", layout="wide")
 db.init_db()
+script_highlighter_component = components.declare_component("script_highlighter", path=str(Path(__file__).with_name("script_highlighter")))
 
 st.markdown("""
 <style>
@@ -38,6 +41,33 @@ ERROR_LABELS = {
 
 def hero(title: str, subtitle: str) -> None:
     st.markdown(f'<div class="hero"><h1>{title}</h1><p>{subtitle}</p></div>', unsafe_allow_html=True)
+
+
+def edit_button(table, row, fields, summary, key):
+    left, right = st.columns([8,1])
+    left.caption(summary)
+    with right.popover("수정", use_container_width=True):
+        values = {}
+        for field, label in fields:
+            current = row.get(field, "")
+            if field in ("activity_type", "pair_type", "interpretation_type", "direction"):
+                if field == "activity_type": options, shown = list(ACTIVITY_LABELS), ACTIVITY_LABELS.get(current,current)
+                elif field == "pair_type": options, shown = list(TYPE_LABELS), TYPE_LABELS.get(current,current)
+                elif field == "interpretation_type": options, shown = ["동시통역","순차통역"], current
+                else: options, shown = ["KO→JA","JA→KO"], current
+                display = ACTIVITY_LABELS if field=="activity_type" else TYPE_LABELS if field=="pair_type" else {}
+                values[field] = st.selectbox(label, options, index=options.index(current), format_func=lambda x,d=display:d.get(x,x), key=f"{key}_{field}")
+            elif field in ("minutes","difficulty","omission","number_omission","logic_error","expression_block","unnatural_expression","mastery"):
+                values[field] = st.number_input(label, min_value=0 if field not in ("minutes","difficulty","mastery") else 1, value=int(current), key=f"{key}_{field}")
+            elif field == "video_speed":
+                values[field] = st.select_slider(label, options=[round(.7+i*.05,2) for i in range(7)], value=float(current or 1.0), key=f"{key}_{field}")
+            elif "script" in field or field in ("content","feedback","other_notes","notes"):
+                values[field] = st.text_area(label, value=str(current or ""), height=140, key=f"{key}_{field}")
+            else:
+                values[field] = st.text_input(label, value=str(current or ""), key=f"{key}_{field}")
+        if st.button("변경사항 저장", type="primary", key=f"{key}_save"):
+            db.update_record(table, row["id"], values)
+            st.success("수정했습니다."); st.rerun()
 
 
 def dashboard():
@@ -145,6 +175,11 @@ def practice():
     st.subheader("최근 기록")
     rows = [{"날짜":r["practice_date"], "연습유형":ACTIVITY_LABELS.get(r["activity_type"], r["activity_type"]), "방향":r["direction"], "자료":r["title"], "주제":r["topic"], "URL":r.get("source_url", ""), "속도":f"×{r.get('video_speed',1.0):.2f}" if r["activity_type"]=="simultaneous" else "—", "분":r["minutes"], "난이도":r["difficulty"]} for r in db.recent_practices(20)]
     st.dataframe(rows, use_container_width=True, hide_index=True) if rows else st.info("아직 연습 기록이 없습니다.")
+    if rows:
+        with st.expander("연습 기록 수정"):
+            raw_rows = db.recent_practices(20)
+            fields = [(x,y) for x,y in [("practice_date","날짜"),("activity_type","연습 유형"),("direction","방향"),("title","자료 제목"),("topic","주제"),("source_url","URL"),("video_speed","속도"),("minutes","분"),("difficulty","난이도"),("omission","내용 누락"),("number_omission","숫자 누락"),("logic_error","논리 오류"),("expression_block","표현 막힘"),("unnatural_expression","부자연스러운 표현"),("other_notes","메모")]]
+            for r in raw_rows: edit_button("practices", r, fields, f"{r['practice_date']} · {ACTIVITY_LABELS.get(r['activity_type'])} {r['direction']} · {r['title']}", f"practice_{r['id']}")
 
 
 def language_pairs():
@@ -175,6 +210,9 @@ def language_pairs():
     if rows:
         shown = [{"한국어":r["korean"], "일본어":r["japanese"], "유형":TYPE_LABELS[r["pair_type"]], "출처":r["source"], "숙지도":"★"*r["mastery"], "복습":r["review_count"]} for r in rows]
         st.dataframe(shown, use_container_width=True, hide_index=True)
+        with st.expander("언어쌍 수정"):
+            fields = [("korean","한국어"),("japanese","일본어"),("pair_type","유형"),("source","출처"),("notes","메모"),("mastery","숙지도")]
+            for r in rows: edit_button("language_pairs", r, fields, f"{r['korean']} → {r['japanese']}", f"pair_{r['id']}")
     else: st.info("조건에 맞는 언어쌍이 없습니다.")
 
 
@@ -219,6 +257,7 @@ def study_notes():
             with st.expander(f"{note['note_date']} · {note['title']}"):
                 st.write(note["content"])
                 if note["tags"]: st.caption(f"태그: {note['tags']}")
+                edit_button("study_notes", note, [("note_date","날짜"),("title","제목"),("content","내용"),("tags","태그")], "이 메모를 수정합니다.", f"note_{note['id']}")
     else:
         st.info("조건에 맞는 메모가 없습니다.")
 
@@ -270,6 +309,27 @@ def script_feedback():
     for item in db.all_script_feedbacks()[:20]:
         with st.expander(f"{item['feedback_date']} · {item['interpretation_type']} {item['direction']} · {item['title']}"):
             st.text(item["feedback"])
+            edit_button("script_feedbacks", item, [("feedback_date","날짜"),("interpretation_type","통역 유형"),("direction","방향"),("title","제목"),("source_script","대상 스크립트"),("interpreted_script","실제 통역 스크립트"),("feedback","피드백")], "이 피드백 기록을 수정합니다.", f"feedback_{item['id']}")
+
+
+def script_review():
+    hero("스크립트 복습", "본문을 드래그해 하이라이트하고 선택한 부분 아래에 메모를 남기세요.")
+    with st.expander("새 복습 스크립트 추가", expanded=not bool(db.all_script_reviews())):
+        with st.form("new_review_script", clear_on_submit=True):
+            title = st.text_input("스크립트 제목 *")
+            text = st.text_area("스크립트 *", height=260)
+            if st.form_submit_button("스크립트 저장", type="primary"):
+                if not title.strip() or not text.strip(): st.error("제목과 스크립트를 입력해주세요.")
+                else: db.add_script_review(title.strip(), text.strip()); st.success("저장했습니다."); st.rerun()
+    scripts = db.all_script_reviews()
+    if not scripts: st.info("복습할 스크립트를 먼저 추가해주세요."); return
+    selected_id = st.selectbox("복습할 스크립트", [r["id"] for r in scripts], format_func=lambda i: next(r["title"] for r in scripts if r["id"]==i))
+    item = next(r for r in scripts if r["id"] == selected_id)
+    highlights = script_highlighter_component(text=item["script_text"], highlights=item.get("highlights") or "[]", key=f"highlighter_{selected_id}", default=item.get("highlights") or "[]")
+    if st.button("하이라이트와 메모 저장", type="primary", use_container_width=True):
+        db.update_record("script_reviews", selected_id, {"highlights": highlights or "[]"})
+        st.success("복습 내용을 저장했습니다."); st.rerun()
+    edit_button("script_reviews", item, [("title","제목"),("script_text","스크립트")], "스크립트 원문을 수정합니다. 원문 위치가 바뀌면 기존 하이라이트 위치도 달라질 수 있습니다.", f"script_{selected_id}")
 
 
 def statistics():
@@ -332,7 +392,7 @@ def records_manager():
                 st.rerun()
 
 
-pages = {"대시보드": dashboard, "연습": practice, "언어쌍": language_pairs, "리뷰": review, "스크립트 피드백": script_feedback, "공부 메모": study_notes, "기록 수정": records_manager, "통계": statistics}
+pages = {"대시보드": dashboard, "연습": practice, "언어쌍": language_pairs, "리뷰": review, "스크립트 피드백": script_feedback, "스크립트 복습": script_review, "공부 메모": study_notes, "통계": statistics}
 st.sidebar.title("🎧 통역 플래너")
 st.sidebar.caption(f"저장소 · {db.backend_name()}")
 selection = st.sidebar.radio("메뉴", list(pages), label_visibility="collapsed")
