@@ -43,6 +43,9 @@ class DatabaseTest(unittest.TestCase):
         db.update_record("script_reviews", script_id, {"highlights":'[{"start":0,"end":2,"note":"메모"}]'}, self.path)
         saved_highlights = db.query("SELECT highlights FROM script_reviews WHERE id=?", (script_id,), self.path)[0]["highlights"]
         self.assertIn("메모", saved_highlights)
+        event_id = db.add_sight_translation("KO→JA", "2026-08-07", self.path)
+        self.assertGreater(event_id, 0)
+        self.assertEqual(len(db.sight_translation_events("2026-08-07", "2026-08-07", self.path)), 1)
         pair_id = db.add_pair({"korean":"정책을 추진하다", "japanese":"政策を推進する", "pair_type":"collocation", "mastery":2}, self.path)
         self.assertEqual(db.review_queue(db_path=self.path)[0]["id"], pair_id)
         db.record_review(pair_id, 0, self.path)
