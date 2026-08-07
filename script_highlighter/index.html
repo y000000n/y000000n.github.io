@@ -5,6 +5,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0
 <div class="hint">메모할 부분을 드래그하세요. 선택한 위치가 바로 하이라이트되고 그 아래에 메모 입력창이 나타납니다.</div><div id="text"></div>
 <script>
 let args={text:"",highlights:[]}, pending=null, initialized=false;
+(function(){
+if(window.__scriptHighlighterV6Booted){parent.postMessage({isStreamlitMessage:true,type:'streamlit:componentReady',apiVersion:1},'*');return}
+window.__scriptHighlighterV6Booted=true;
 var highlighterState={text:"",highlights:[]}, pending=null, initialized=false, lastSelection=null;
 function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function render(){let hs=[...(args.highlights||[])].sort((a,b)=>a.start-b.start),out='',p=0;for(const h of hs){out+=esc(args.text.slice(p,h.start));out+='<mark>'+esc(args.text.slice(h.start,h.end))+'</mark>';p=h.end}out+=esc(args.text.slice(p));document.getElementById('text').innerHTML=out;document.getElementById('notes').innerHTML=hs.map((h,i)=>'<div class="note"><button class="remove" onclick="removeH('+i+')">삭제</button><b>'+esc(args.text.slice(h.start,h.end))+'</b><br>'+esc(h.note)+'</div>').join('');height()}
@@ -29,12 +32,13 @@ function send(){parent.postMessage({isStreamlitMessage:true,type:'streamlit:setC
 function height(){setTimeout(()=>parent.postMessage({isStreamlitMessage:true,type:'streamlit:setFrameHeight',height:document.body.scrollHeight+10},'*'),10)}
 window.addEventListener('message',e=>{if(e.data.type==='streamlit:render'){const newText=e.data.args.text||'';if(!initialized||newText!==args.text){try{args.highlights=JSON.parse(e.data.args.highlights||'[]')}catch{args.highlights=[]}}args.text=newText;initialized=true;render();parent.postMessage({isStreamlitMessage:true,type:'streamlit:componentReady',apiVersion:1},'*')}});
 function receiveRender(e){if(e.data.type==='streamlit:render'){const newText=e.data.args.text||'';if(!initialized||newText!==highlighterState.text){try{var raw=e.data.args.highlights||'[]';highlighterState.highlights=typeof raw==='string'?JSON.parse(raw):raw}catch(error){highlighterState.highlights=[]}}highlighterState.text=String(newText);initialized=true;safeRender();parent.postMessage({isStreamlitMessage:true,type:'streamlit:componentReady',apiVersion:1},'*')}}
-if(!window.__scriptHighlighterV5Listeners){
+if(!window.__scriptHighlighterV6Listeners){
   document.addEventListener('selectionchange',()=>{const value=readSelection();if(value)lastSelection=value});
   document.getElementById('text').addEventListener('mouseup',captureSelection);
   document.getElementById('text').addEventListener('touchend',captureSelection);
   window.addEventListener('message',receiveRender);
-  window.__scriptHighlighterV5Listeners=true;
+  window.__scriptHighlighterV6Listeners=true;
 }
 parent.postMessage({isStreamlitMessage:true,type:'streamlit:componentReady',apiVersion:1},'*');height();
+})();
 </script></body></html>
