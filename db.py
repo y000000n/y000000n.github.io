@@ -121,7 +121,7 @@ def init_db(db_path: Path | str = DB_PATH) -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 practice_date TEXT NOT NULL,
                 activity_type TEXT NOT NULL DEFAULT 'simultaneous',
-                direction TEXT NOT NULL CHECK(direction IN ('KO→JA', 'JA→KO')),
+                direction TEXT NOT NULL CHECK(direction IN ('KO→JA', 'JA→KO', '없음')),
                 title TEXT NOT NULL,
                 topic TEXT DEFAULT '',
                 source_url TEXT DEFAULT '',

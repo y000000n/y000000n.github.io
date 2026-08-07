@@ -74,6 +74,42 @@ def edit_button(table, row, fields, summary, key):
             st.success("수정했습니다."); st.rerun()
 
 
+def selected_record_editor(table, rows, fields, summary_func, key):
+    if not rows:
+        return
+    selected_id = st.selectbox("수정할 기록 선택", [None] + [r["id"] for r in rows],
+        format_func=lambda i: "기록을 선택하세요" if i is None else summary_func(next(r for r in rows if r["id"] == i)), key=f"{key}_picker")
+    state_key = f"{key}_editing"
+    if selected_id is not None and st.button("선택한 기록 수정", key=f"{key}_open"):
+        st.session_state[state_key] = selected_id
+    editing_id = st.session_state.get(state_key)
+    if editing_id is None or not any(r["id"] == editing_id for r in rows): return
+    row = next(r for r in rows if r["id"] == editing_id)
+    with st.container(border=True):
+        st.caption(summary_func(row))
+        with st.form(f"{key}_form"):
+            values = {}
+            for field, label in fields:
+                current = row.get(field, "")
+                if field in ("activity_type", "pair_type", "interpretation_type", "direction"):
+                    if field == "activity_type": options, display = list(ACTIVITY_LABELS), ACTIVITY_LABELS
+                    elif field == "pair_type": options, display = list(TYPE_LABELS), TYPE_LABELS
+                    elif field == "interpretation_type": options, display = ["동시통역", "순차통역"], {}
+                    else: options, display = ["KO→JA", "JA→KO", "없음"], {}
+                    if current not in options: current = options[0]
+                    values[field] = st.selectbox(label, options, index=options.index(current), format_func=lambda x,d=display:d.get(x,x), key=f"{key}_{editing_id}_{field}")
+                elif field in ("minutes","difficulty","omission","number_omission","logic_error","expression_block","unnatural_expression","mastery"):
+                    values[field] = st.number_input(label, min_value=0 if field not in ("minutes","difficulty","mastery") else 1, value=int(current), key=f"{key}_{editing_id}_{field}")
+                elif field == "video_speed": values[field] = st.select_slider(label, options=[round(.7+i*.05,2) for i in range(7)], value=float(current or 1.0), key=f"{key}_{editing_id}_{field}")
+                elif "script" in field or field in ("content","feedback","other_notes","notes"): values[field] = st.text_area(label, value=str(current or ""), height=140, key=f"{key}_{editing_id}_{field}")
+                else: values[field] = st.text_input(label, value=str(current or ""), key=f"{key}_{editing_id}_{field}")
+            save, cancel = st.columns(2)
+            if save.form_submit_button("변경사항 저장", type="primary", use_container_width=True):
+                if table == "practices" and values.get("activity_type") == "shadowing": values["direction"] = "없음"
+                db.update_record(table, row["id"], values); st.session_state[state_key] = None; st.rerun()
+            if cancel.form_submit_button("취소", use_container_width=True): st.session_state[state_key] = None; st.rerun()
+
+
 def dashboard():
     settings = db.get_settings()
     exam = datetime.strptime(settings["exam_date"], "%Y-%m-%d").date()
@@ -82,7 +118,7 @@ def dashboard():
     today = date.today().isoformat()
     week = db.week_start()
     week_practices = db.practices_between(week)
-    mins = {direction: sum(r["minutes"] for r in week_practices if r["direction"] == direction) for direction in ("KO→JA", "JA→KO")}
+    mins = {direction: sum(r["minutes"] for r in week_practices if r["activity_type"] != "shadowing" and r["direction"] == direction) for direction in ("KO→JA", "JA→KO")}
     pair_count = sum(1 for r in db.all_pairs() if str(r["created_at"])[:10] >= week)
     total_goal = int(settings["weekly_ko_ja_goal"]) + int(settings["weekly_ja_ko_goal"])
     total_mins = sum(mins.values())
@@ -100,12 +136,11 @@ def dashboard():
         ("shadowing", None, "섀도잉"),
     ]
     today_raw = db.practices_between(today, today)
-    today_rows = [{"activity_type": a, "direction": d, "minutes": sum(r["minutes"] for r in today_raw if r["activity_type"] == a and r["direction"] == d)} for a in ACTIVITY_LABELS for d in ("KO→JA", "JA→KO")]
     def routine_minutes(rows, activity, direction):
         return sum(r["minutes"] for r in rows if r["activity_type"] == activity and (direction is None or r["direction"] == direction))
     cols = st.columns(5)
     for col, (activity, direction, label) in zip(cols, routines):
-        current = routine_minutes(today_rows, activity, direction)
+        current = routine_minutes(today_raw, activity, direction)
         col.markdown(f"### {'✅' if current >= 10 else '⬜'} {label}")
         col.caption(f"오늘 {current}분 / 기본 10분")
         col.progress(min(current / 10, 1.0))
@@ -119,30 +154,22 @@ def dashboard():
     st.subheader("이번 주 루틴 실천표")
     week_days = [date.fromisoformat(week) + timedelta(days=i) for i in range(7)]
     weekly_raw = db.practices_between(week_days[0].isoformat(), week_days[-1].isoformat())
-    weekly_rows = [{"practice_date": day.isoformat(), "activity_type": a, "direction": d, "minutes": sum(r["minutes"] for r in weekly_raw if str(r["practice_date"])[:10] == day.isoformat() and r["activity_type"] == a and r["direction"] == d)} for day in week_days for a in ACTIVITY_LABELS for d in ("KO→JA", "JA→KO")]
     table = []
     for activity, direction, label in routines:
         row = {"기본 루틴": label}
         for day in week_days:
-            day_rows = [r for r in weekly_rows if r["practice_date"] == day.isoformat()]
+            day_rows = [r for r in weekly_raw if str(r["practice_date"])[:10] == day.isoformat()]
             amount = routine_minutes(day_rows, activity, direction)
             row[f"{day.strftime('%m/%d')}\n{'월화수목금토일'[day.weekday()]}"] = "✅" if amount >= 10 else (f"{amount}분" if amount else "—")
         table.append(row)
-    st.dataframe(table, use_container_width=True, hide_index=True)
-    st.markdown("#### 기본 루틴 · 시역 주간 현황")
     sight_events = db.sight_translation_events(week_days[0].isoformat(), week_days[-1].isoformat())
-    today_sight_cols = st.columns(2)
-    for col, direction in zip(today_sight_cols, ("KO→JA", "JA→KO")):
-        today_count = sum(1 for e in sight_events if str(e["practice_date"])[:10] == date.today().isoformat() and e["direction"] == direction)
-        col.metric(f"오늘 {direction} 시역", f"{today_count} / 7회", "목표 달성" if today_count >= 7 else f"{7-today_count}회 남음")
-    sight_table = []
     for direction in ("KO→JA", "JA→KO"):
-        row = {"시역 방향": direction}
+        row = {"기본 루틴": f"{direction} 시역(회)"}
         for day in week_days:
             count = sum(1 for e in sight_events if str(e["practice_date"])[:10] == day.isoformat() and e["direction"] == direction)
-            row[f"{day.strftime('%m/%d')}\n{'월화수목금토일'[day.weekday()]}"] = "✅" if count >= 7 else f"{count}/7"
-        sight_table.append(row)
-    st.dataframe(sight_table, use_container_width=True, hide_index=True)
+            row[f"{day.strftime('%m/%d')}\n{'월화수목금토일'[day.weekday()]}"] = count
+        table.append(row)
+    st.dataframe(table, use_container_width=True, hide_index=True)
     st.subheader("최근 공부 메모")
     recent_notes = db.all_notes()[:3]
     if recent_notes:
@@ -193,7 +220,11 @@ def practice():
         practice_types = {k:v for k,v in ACTIVITY_LABELS.items() if k != "sight_translation"}
         activity_label = c2.selectbox("연습 유형", list(practice_types.values()))
         activity_type = next(k for k, v in ACTIVITY_LABELS.items() if v == activity_label)
-        direction = c3.segmented_control("방향", ["KO→JA", "JA→KO"], default="KO→JA")
+        if activity_type == "shadowing":
+            c3.text_input("방향", value="해당 없음", disabled=True)
+            direction = "없음"
+        else:
+            direction = c3.segmented_control("방향", ["KO→JA", "JA→KO"], default="KO→JA")
         title = st.text_input("자료 제목 *", placeholder="예: 기후변화 정상회의 연설 또는 시역 기사 제목")
         topic = st.text_input("주제", placeholder="예: 환경·에너지")
         source_url = st.text_input("자료 URL", placeholder="https://…", help="동시통역·순차통역·시역 자료의 원문, 기사 또는 영상 주소를 저장하세요.")
@@ -214,16 +245,16 @@ def practice():
                     db.add_practice({"practice_date": day.isoformat(), "activity_type": activity_type, "direction": direction, "title": title.strip(), "topic": topic.strip(), "source_url": source_url.strip() if activity_type in ("simultaneous", "consecutive", "sight_translation") else "", "video_speed": video_speed if activity_type == "simultaneous" else 1.0, "minutes": minutes, "difficulty": difficulty, **errors, "other_notes": notes.strip()})
                     st.success("연습 기록을 저장했습니다.")
     st.subheader("최근 기록")
-    rows = [{"날짜":r["practice_date"], "연습유형":ACTIVITY_LABELS.get(r["activity_type"], r["activity_type"]), "방향":r["direction"], "자료":r["title"], "주제":r["topic"], "URL":r.get("source_url", ""), "속도":f"×{r.get('video_speed',1.0):.2f}" if r["activity_type"]=="simultaneous" else "—", "분":r["minutes"], "난이도":r["difficulty"]} for r in db.recent_practices(20)]
+    rows = [{"날짜":r["practice_date"], "연습유형":ACTIVITY_LABELS.get(r["activity_type"], r["activity_type"]), "방향":"—" if r["activity_type"]=="shadowing" else r["direction"], "자료":r["title"], "주제":r["topic"], "URL":r.get("source_url", ""), "속도":f"×{r.get('video_speed',1.0):.2f}" if r["activity_type"]=="simultaneous" else "—", "분":r["minutes"], "난이도":r["difficulty"]} for r in db.recent_practices(20)]
     if rows:
         st.dataframe(rows, use_container_width=True, hide_index=True)
     else:
         st.info("아직 연습 기록이 없습니다.")
     if rows:
-        st.markdown("#### 기록별 수정")
+        st.markdown("#### 기록 수정")
         raw_rows = db.recent_practices(20)
         fields = [(x,y) for x,y in [("practice_date","날짜"),("activity_type","연습 유형"),("direction","방향"),("title","자료 제목"),("topic","주제"),("source_url","URL"),("video_speed","속도"),("minutes","분"),("difficulty","난이도"),("omission","내용 누락"),("number_omission","숫자 누락"),("logic_error","논리 오류"),("expression_block","표현 막힘"),("unnatural_expression","부자연스러운 표현"),("other_notes","메모")]]
-        for r in raw_rows: edit_button("practices", r, fields, f"{r['practice_date']} · {ACTIVITY_LABELS.get(r['activity_type'])} {r['direction']} · {r['title']}", f"practice_{r['id']}")
+        selected_record_editor("practices", raw_rows, fields, lambda r: f"{r['practice_date']} · {ACTIVITY_LABELS.get(r['activity_type'])}{'' if r['activity_type']=='shadowing' else ' '+r['direction']} · {r['title']}", "practice")
 
 
 def language_pairs():
@@ -254,9 +285,9 @@ def language_pairs():
     if rows:
         shown = [{"한국어":r["korean"], "일본어":r["japanese"], "유형":TYPE_LABELS[r["pair_type"]], "출처":r["source"], "숙지도":"★"*r["mastery"], "복습":r["review_count"]} for r in rows]
         st.dataframe(shown, use_container_width=True, hide_index=True)
-        st.markdown("#### 기록별 수정")
+        st.markdown("#### 기록 수정")
         fields = [("korean","한국어"),("japanese","일본어"),("pair_type","유형"),("source","출처"),("notes","메모"),("mastery","숙지도")]
-        for r in rows: edit_button("language_pairs", r, fields, f"{r['korean']} → {r['japanese']}", f"pair_{r['id']}")
+        selected_record_editor("language_pairs", rows, fields, lambda r: f"{r['korean']} → {r['japanese']}", "pair")
     else: st.info("조건에 맞는 언어쌍이 없습니다.")
 
 
@@ -298,10 +329,11 @@ def study_notes():
     notes = db.find_notes(keyword)
     if notes:
         for note in notes:
-            edit_button("study_notes", note, [("note_date","날짜"),("title","제목"),("content","내용"),("tags","태그")], f"{note['note_date']} · {note['title']}", f"note_{note['id']}")
             with st.expander(f"{note['note_date']} · {note['title']}"):
                 st.write(note["content"])
                 if note["tags"]: st.caption(f"태그: {note['tags']}")
+        st.markdown("#### 기록 수정")
+        selected_record_editor("study_notes", notes, [("note_date","날짜"),("title","제목"),("content","내용"),("tags","태그")], lambda r: f"{r['note_date']} · {r['title']}", "note")
     else:
         st.info("조건에 맞는 메모가 없습니다.")
 
@@ -350,10 +382,13 @@ def script_feedback():
     if st.session_state.get("latest_script_feedback"):
         st.subheader("이번 분석 결과"); st.text(st.session_state["latest_script_feedback"])
     st.subheader("저장된 피드백")
-    for item in db.all_script_feedbacks()[:20]:
-        edit_button("script_feedbacks", item, [("feedback_date","날짜"),("interpretation_type","통역 유형"),("direction","방향"),("title","제목"),("source_script","대상 스크립트"),("interpreted_script","실제 통역 스크립트"),("feedback","피드백")], f"{item['feedback_date']} · {item['interpretation_type']} {item['direction']} · {item['title']}", f"feedback_{item['id']}")
+    feedback_items = db.all_script_feedbacks()[:20]
+    for item in feedback_items:
         with st.expander(f"{item['feedback_date']} · {item['interpretation_type']} {item['direction']} · {item['title']}"):
             st.text(item["feedback"])
+    if feedback_items:
+        st.markdown("#### 기록 수정")
+        selected_record_editor("script_feedbacks", feedback_items, [("feedback_date","날짜"),("interpretation_type","통역 유형"),("direction","방향"),("title","제목"),("source_script","대상 스크립트"),("interpreted_script","실제 통역 스크립트"),("feedback","피드백")], lambda r: f"{r['feedback_date']} · {r['interpretation_type']} {r['direction']} · {r['title']}", "feedback")
 
 
 def script_review():
@@ -385,7 +420,8 @@ def statistics():
     pairs = pd.DataFrame(db.all_pairs())
     if practices.empty and pairs.empty: st.info("기록이 쌓이면 통계가 표시됩니다."); return
     if not practices.empty:
-        totals = practices.groupby("direction")["minutes"].sum().reindex(["KO→JA","JA→KO"], fill_value=0)
+        directional = practices[practices["activity_type"] != "shadowing"]
+        totals = directional.groupby("direction")["minutes"].sum().reindex(["KO→JA","JA→KO"], fill_value=0)
         a,b = st.columns(2); a.metric("KO→JA 누적", f"{totals['KO→JA']}분"); b.metric("JA→KO 누적", f"{totals['JA→KO']}분")
         st.subheader("방향별 누적 연습시간"); st.bar_chart(totals, horizontal=True)
         activity_totals = practices.groupby("activity_type")["minutes"].sum().rename(index=ACTIVITY_LABELS)
@@ -393,7 +429,7 @@ def statistics():
         error_totals = practices[list(ERROR_LABELS)].sum().rename(index=ERROR_LABELS)
         st.subheader("오류 유형 누적"); st.bar_chart(error_totals.sort_values(ascending=False), horizontal=True)
         practices["practice_date"] = pd.to_datetime(practices["practice_date"])
-        weekly = practices.set_index("practice_date").groupby("direction")["minutes"].resample("W-MON").sum().unstack(0).fillna(0)
+        weekly = directional.set_index("practice_date").groupby("direction")["minutes"].resample("W-MON").sum().unstack(0).fillna(0)
         st.subheader("주간 연습시간 추이"); st.line_chart(weekly)
     if not pairs.empty:
         pairs["created_at"] = pd.to_datetime(pairs["created_at"])
@@ -443,5 +479,5 @@ pages = {"대시보드": dashboard, "통역 연습": practice, "언어쌍": lang
 st.sidebar.title("🎧 통역 플래너")
 st.sidebar.caption(f"저장소 · {db.backend_name()}")
 selection = st.sidebar.radio("메뉴", list(pages), label_visibility="collapsed")
-st.sidebar.caption("기본 루틴 · 방향별 동시통역·순차통역, 섀도잉 각 10분")
+st.sidebar.caption("기본 루틴 · 방향별 동시통역·순차통역과 방향 없는 섀도잉 각 10분")
 pages[selection]()
