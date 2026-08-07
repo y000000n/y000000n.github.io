@@ -14,7 +14,7 @@ st.set_page_config(page_title="통역 졸업시험 플래너", page_icon="🎧",
 db.init_db()
 _component_dir = Path(__file__).with_name("script_highlighter_v8")
 script_highlighter_component = (
-    components.declare_component("script_highlighter_inline_v9", path=str(_component_dir))
+    components.declare_component("script_highlighter_inline_v10", path=str(_component_dir))
     if _component_dir.is_dir() else None
 )
 
@@ -109,6 +109,13 @@ def dashboard():
         col.markdown(f"### {'✅' if current >= 10 else '⬜'} {label}")
         col.caption(f"오늘 {current}분 / 기본 10분")
         col.progress(min(current / 10, 1.0))
+    today_sight_events = db.sight_translation_events(today, today)
+    sight_cols = st.columns(2)
+    for col, direction in zip(sight_cols, ("KO→JA", "JA→KO")):
+        sight_count = sum(1 for e in today_sight_events if e["direction"] == direction)
+        col.markdown(f"### {'✅' if sight_count >= 7 else '⬜'} {direction} 시역")
+        col.caption(f"오늘 {sight_count}회 / 기본 7회")
+        col.progress(min(sight_count / 7, 1.0))
     st.subheader("이번 주 루틴 실천표")
     week_days = [date.fromisoformat(week) + timedelta(days=i) for i in range(7)]
     weekly_raw = db.practices_between(week_days[0].isoformat(), week_days[-1].isoformat())
@@ -122,7 +129,7 @@ def dashboard():
             row[f"{day.strftime('%m/%d')}\n{'월화수목금토일'[day.weekday()]}"] = "✅" if amount >= 10 else (f"{amount}분" if amount else "—")
         table.append(row)
     st.dataframe(table, use_container_width=True, hide_index=True)
-    st.subheader("이번 주 시역 실천표")
+    st.markdown("#### 기본 루틴 · 시역 주간 현황")
     sight_events = db.sight_translation_events(week_days[0].isoformat(), week_days[-1].isoformat())
     today_sight_cols = st.columns(2)
     for col, direction in zip(today_sight_cols, ("KO→JA", "JA→KO")):
@@ -165,6 +172,21 @@ def dashboard():
 
 def practice():
     hero("통역 연습", "동시통역·순차통역·섀도잉 연습과 셀프피드백을 기록하세요.")
+    st.subheader("오늘의 시역")
+    st.caption("기사를 한 편 시역할 때마다 버튼을 누르세요. KO→JA와 JA→KO 각각 하루 7회가 기본 루틴입니다.")
+    today_sight = db.sight_translation_events(date.today().isoformat(), date.today().isoformat())
+    sight_cols = st.columns(2)
+    for col, direction in zip(sight_cols, ("KO→JA", "JA→KO")):
+        count = sum(1 for e in today_sight if e["direction"] == direction)
+        with col.container(border=True):
+            st.markdown(f"### {'✅' if count >= 7 else '⬜'} {direction} 시역")
+            st.metric("오늘 횟수", f"{count} / 7회", "목표 달성" if count >= 7 else f"{7-count}회 남음")
+            st.progress(min(count / 7, 1.0))
+            if st.button(f"{direction} 시역 +1", type="primary", use_container_width=True, key=f"sight_top_{direction}"):
+                db.add_sight_translation(direction)
+                st.rerun()
+    st.divider()
+    st.subheader("통역 연습 기록")
     with st.form("practice", clear_on_submit=True):
         c1, c2, c3 = st.columns(3)
         day = c1.date_input("날짜", date.today())
@@ -202,20 +224,6 @@ def practice():
         raw_rows = db.recent_practices(20)
         fields = [(x,y) for x,y in [("practice_date","날짜"),("activity_type","연습 유형"),("direction","방향"),("title","자료 제목"),("topic","주제"),("source_url","URL"),("video_speed","속도"),("minutes","분"),("difficulty","난이도"),("omission","내용 누락"),("number_omission","숫자 누락"),("logic_error","논리 오류"),("expression_block","표현 막힘"),("unnatural_expression","부자연스러운 표현"),("other_notes","메모")]]
         for r in raw_rows: edit_button("practices", r, fields, f"{r['practice_date']} · {ACTIVITY_LABELS.get(r['activity_type'])} {r['direction']} · {r['title']}", f"practice_{r['id']}")
-    st.divider()
-    st.subheader("오늘의 시역")
-    st.caption("기사를 한 편 시역할 때마다 버튼을 누르세요. 방향별 하루 목표는 7회입니다.")
-    today_sight = db.sight_translation_events(date.today().isoformat(), date.today().isoformat())
-    cols = st.columns(2)
-    for col, direction in zip(cols, ("KO→JA", "JA→KO")):
-        count = sum(1 for e in today_sight if e["direction"] == direction)
-        with col.container(border=True):
-            st.markdown(f"### {direction} 시역")
-            st.metric("오늘 횟수", f"{count} / 7회")
-            st.progress(min(count / 7, 1.0))
-            if st.button(f"{direction} 시역 +1", type="primary", use_container_width=True, key=f"sight_{direction}"):
-                db.add_sight_translation(direction)
-                st.rerun()
 
 
 def language_pairs():
