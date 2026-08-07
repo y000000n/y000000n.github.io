@@ -1,0 +1,246 @@
+from __future__ import annotations
+
+from datetime import date, datetime, timedelta
+
+import pandas as pd
+import streamlit as st
+
+import db
+
+st.set_page_config(page_title="통역 졸업시험 플래너", page_icon="🎧", layout="wide")
+db.init_db()
+
+st.markdown("""
+<style>
+  .stApp { background: #f7f8fa; }
+  [data-testid="stMetric"] { background:white; border:1px solid #e8eaee; padding:18px; border-radius:14px; }
+  .hero { padding:22px 26px; border-radius:18px; color:white; background:linear-gradient(120deg,#263b73,#4069b1); margin-bottom:20px; }
+  .hero h1 { margin:0 0 6px; font-size:1.75rem; }
+  .hero p { margin:0; opacity:.85; }
+  .card { background:white; border:1px solid #e8eaee; border-radius:14px; padding:20px; }
+  .muted { color:#667085; font-size:.92rem; }
+</style>
+""", unsafe_allow_html=True)
+
+TYPE_LABELS = {"collocation": "콜로케이션", "term": "용어", "pattern": "패턴", "other": "기타"}
+ACTIVITY_LABELS = {"simultaneous": "동시통역", "consecutive": "순차통역", "sight_translation": "시역", "shadowing": "섀도잉"}
+ERROR_LABELS = {
+    "omission": "내용 누락", "number_omission": "숫자 누락", "logic_error": "논리관계 오류",
+    "expression_block": "표현 막힘", "unnatural_expression": "부자연스러운 표현",
+}
+
+
+def hero(title: str, subtitle: str) -> None:
+    st.markdown(f'<div class="hero"><h1>{title}</h1><p>{subtitle}</p></div>', unsafe_allow_html=True)
+
+
+def dashboard():
+    settings = db.get_settings()
+    exam = datetime.strptime(settings["exam_date"], "%Y-%m-%d").date()
+    dday = (exam - date.today()).days
+    hero("오늘도 한 문장씩, 더 정확하게", f"졸업시험까지 D-{dday}" if dday >= 0 else f"시험일로부터 {abs(dday)}일")
+    today = date.today().isoformat()
+    week = db.week_start()
+    week_practices = db.practices_between(week)
+    mins = {direction: sum(r["minutes"] for r in week_practices if r["direction"] == direction) for direction in ("KO→JA", "JA→KO")}
+    pair_count = sum(1 for r in db.all_pairs() if str(r["created_at"])[:10] >= week)
+    total_goal = int(settings["weekly_ko_ja_goal"]) + int(settings["weekly_ja_ko_goal"])
+    total_mins = sum(mins.values())
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("시험 D-day", f"D-{dday}" if dday >= 0 else "종료")
+    c2.metric("이번 주 연습", f"{total_mins}분", f"목표 {total_goal}분")
+    c3.metric("연습 목표 진행률", f"{min(100, total_mins / total_goal * 100) if total_goal else 0:.0f}%")
+    c4.metric("이번 주 신규 언어쌍", f"{pair_count}개", f"목표 {settings['weekly_pairs_goal']}개")
+    st.subheader("오늘의 기본 루틴")
+    routines = [
+        ("simultaneous", "KO→JA", "KO→JA 동시통역"),
+        ("simultaneous", "JA→KO", "JA→KO 동시통역"),
+        ("consecutive", "KO→JA", "KO→JA 순차통역"),
+        ("consecutive", "JA→KO", "JA→KO 순차통역"),
+        ("shadowing", None, "섀도잉"),
+    ]
+    today_raw = db.practices_between(today, today)
+    today_rows = [{"activity_type": a, "direction": d, "minutes": sum(r["minutes"] for r in today_raw if r["activity_type"] == a and r["direction"] == d)} for a in ACTIVITY_LABELS for d in ("KO→JA", "JA→KO")]
+    def routine_minutes(rows, activity, direction):
+        return sum(r["minutes"] for r in rows if r["activity_type"] == activity and (direction is None or r["direction"] == direction))
+    cols = st.columns(5)
+    for col, (activity, direction, label) in zip(cols, routines):
+        current = routine_minutes(today_rows, activity, direction)
+        col.markdown(f"### {'✅' if current >= 10 else '⬜'} {label}")
+        col.caption(f"오늘 {current}분 / 기본 10분")
+        col.progress(min(current / 10, 1.0))
+    st.subheader("이번 주 루틴 실천표")
+    week_days = [date.fromisoformat(week) + timedelta(days=i) for i in range(7)]
+    weekly_raw = db.practices_between(week_days[0].isoformat(), week_days[-1].isoformat())
+    weekly_rows = [{"practice_date": day.isoformat(), "activity_type": a, "direction": d, "minutes": sum(r["minutes"] for r in weekly_raw if str(r["practice_date"])[:10] == day.isoformat() and r["activity_type"] == a and r["direction"] == d)} for day in week_days for a in ACTIVITY_LABELS for d in ("KO→JA", "JA→KO")]
+    table = []
+    for activity, direction, label in routines:
+        row = {"기본 루틴": label}
+        for day in week_days:
+            day_rows = [r for r in weekly_rows if r["practice_date"] == day.isoformat()]
+            amount = routine_minutes(day_rows, activity, direction)
+            row[f"{day.strftime('%m/%d')}\n{'월화수목금토일'[day.weekday()]}"] = "✅" if amount >= 10 else (f"{amount}분" if amount else "—")
+        table.append(row)
+    st.dataframe(table, use_container_width=True, hide_index=True)
+    st.subheader("최근 공부 메모")
+    recent_notes = db.all_notes()[:3]
+    if recent_notes:
+        for note in recent_notes:
+            with st.container(border=True):
+                st.markdown(f"**{note['title']}** · {note['note_date']}")
+                st.write(note["content"])
+                if note["tags"]: st.caption(f"#{note['tags'].replace(',', ' #')}")
+    else:
+        st.caption("아직 작성한 메모가 없습니다. Study Notes에서 첫 메모를 남겨보세요.")
+    st.subheader("이번 주 방향별 진행")
+    for direction, key in [("KO→JA", "weekly_ko_ja_goal"), ("JA→KO", "weekly_ja_ko_goal")]:
+        goal = int(settings[key]); current = mins.get(direction, 0)
+        st.write(f"{direction}  ·  {current} / {goal}분")
+        st.progress(min(current / goal, 1.0) if goal else 0)
+    with st.expander("시험일 및 주간 목표 설정"):
+        with st.form("settings"):
+            exam_date = st.date_input("졸업시험일", exam)
+            x, y, z = st.columns(3)
+            ko = x.number_input("KO→JA 주간 목표(분)", 10, 1000, int(settings["weekly_ko_ja_goal"]), 10)
+            ja = y.number_input("JA→KO 주간 목표(분)", 10, 1000, int(settings["weekly_ja_ko_goal"]), 10)
+            pairs = z.number_input("신규 언어쌍 주간 목표(개)", 1, 500, int(settings["weekly_pairs_goal"]), 5)
+            if st.form_submit_button("설정 저장", type="primary"):
+                db.save_settings({"exam_date": exam_date.isoformat(), "weekly_ko_ja_goal": str(ko), "weekly_ja_ko_goal": str(ja), "weekly_pairs_goal": str(pairs)})
+                st.success("설정을 저장했습니다."); st.rerun()
+
+
+def practice():
+    hero("연습", "동시통역·순차통역·시역·섀도잉 연습과 셀프피드백을 기록하세요.")
+    with st.form("practice", clear_on_submit=True):
+        c1, c2, c3 = st.columns(3)
+        day = c1.date_input("날짜", date.today())
+        activity_label = c2.selectbox("연습 유형", list(ACTIVITY_LABELS.values()))
+        activity_type = next(k for k, v in ACTIVITY_LABELS.items() if v == activity_label)
+        direction = c3.segmented_control("방향", ["KO→JA", "JA→KO"], default="KO→JA")
+        title = st.text_input("자료 제목 *", placeholder="예: 기후변화 정상회의 연설 또는 시역 기사 제목")
+        topic = st.text_input("주제", placeholder="예: 환경·에너지")
+        source_url = st.text_input("자료 URL", placeholder="https://…", help="동시통역·순차통역·시역 자료의 원문, 기사 또는 영상 주소를 저장하세요.")
+        c1, c2 = st.columns(2)
+        minutes = c1.number_input("실제 연습시간(분)", 1, 300, 10)
+        difficulty = c2.slider("체감 난이도", 1, 5, 3)
+        st.markdown("#### 셀프피드백 오류 횟수")
+        cols = st.columns(5)
+        errors = {key: cols[i].number_input(label, 0, 999, 0, key=key) for i, (key, label) in enumerate(ERROR_LABELS.items())}
+        notes = st.text_area("기타 메모", placeholder="오류 원인이나 다음 연습에서 신경 쓸 점")
+        if st.form_submit_button("연습 기록 저장", type="primary", use_container_width=True):
+            if not title.strip(): st.error("자료 제목을 입력해주세요.")
+            else:
+                if source_url.strip() and not source_url.strip().startswith(("http://", "https://")):
+                    st.error("자료 URL은 http:// 또는 https://로 시작해야 합니다.")
+                else:
+                    db.add_practice({"practice_date": day.isoformat(), "activity_type": activity_type, "direction": direction, "title": title.strip(), "topic": topic.strip(), "source_url": source_url.strip() if activity_type in ("simultaneous", "consecutive", "sight_translation") else "", "minutes": minutes, "difficulty": difficulty, **errors, "other_notes": notes.strip()})
+                    st.success("연습 기록을 저장했습니다.")
+    st.subheader("최근 기록")
+    rows = [{"날짜":r["practice_date"], "연습유형":ACTIVITY_LABELS.get(r["activity_type"], r["activity_type"]), "방향":r["direction"], "자료":r["title"], "주제":r["topic"], "URL":r.get("source_url", ""), "분":r["minutes"], "난이도":r["difficulty"]} for r in db.recent_practices(20)]
+    st.dataframe(rows, use_container_width=True, hide_index=True) if rows else st.info("아직 연습 기록이 없습니다.")
+
+
+def language_pairs():
+    hero("언어쌍", "통역 중 바로 꺼내 쓸 표현 덩어리를 모으세요.")
+    with st.expander("새 언어쌍 추가", expanded=True):
+        with st.form("pair", clear_on_submit=True):
+            a, b = st.columns(2)
+            korean = a.text_area("한국어 *", placeholder="정책을 적극적으로 추진하다")
+            japanese = b.text_area("일본어 *", placeholder="政策を積極的に推進する")
+            c1, c2, c3 = st.columns(3)
+            pair_type_label = c1.selectbox("유형", list(TYPE_LABELS.values()))
+            source = c2.text_input("출처")
+            mastery = c3.slider("숙지도", 1, 5, 1)
+            notes = st.text_area("메모")
+            if st.form_submit_button("언어쌍 저장", type="primary"):
+                if not korean.strip() or not japanese.strip(): st.error("한국어와 일본어를 모두 입력해주세요.")
+                else:
+                    pair_type = next(k for k, v in TYPE_LABELS.items() if v == pair_type_label)
+                    db.add_pair({"korean": korean.strip(), "japanese": japanese.strip(), "pair_type": pair_type, "source": source.strip(), "notes": notes.strip(), "mastery": mastery})
+                    st.success("언어쌍을 저장했습니다.")
+    st.subheader("언어쌍 검색")
+    c1, c2, c3 = st.columns([2,1,1])
+    term = c1.text_input("검색", placeholder="한국어·일본어·출처 검색", label_visibility="collapsed")
+    kind = c2.selectbox("유형 필터", ["전체"] + list(TYPE_LABELS.values()), label_visibility="collapsed")
+    mastery_filter = c3.selectbox("숙지도 필터", ["전체"] + [str(i) for i in range(1,6)], label_visibility="collapsed")
+    pair_type_filter = next((k for k,v in TYPE_LABELS.items() if v==kind), None)
+    rows = db.find_pairs(term, pair_type_filter, None if mastery_filter == "전체" else int(mastery_filter))
+    if rows:
+        shown = [{"한국어":r["korean"], "일본어":r["japanese"], "유형":TYPE_LABELS[r["pair_type"]], "출처":r["source"], "숙지도":"★"*r["mastery"], "복습":r["review_count"]} for r in rows]
+        st.dataframe(shown, use_container_width=True, hide_index=True)
+    else: st.info("조건에 맞는 언어쌍이 없습니다.")
+
+
+def review():
+    hero("리뷰", "잘 떠오르지 않는 표현이 먼저 나오는 플래시카드입니다.")
+    queue = db.review_queue()
+    if not queue: st.info("먼저 Language Pairs에서 언어쌍을 추가해주세요."); return
+    if "review_pos" not in st.session_state: st.session_state.review_pos = 0
+    if "revealed" not in st.session_state: st.session_state.revealed = False
+    idx = st.session_state.review_pos % len(queue); card = queue[idx]
+    st.caption(f"카드 {idx+1} / {len(queue)} · 복습 {card['review_count']}회")
+    st.markdown(f'<div class="card" style="text-align:center;padding:44px"><div class="muted">한국어</div><h2>{card["korean"]}</h2></div>', unsafe_allow_html=True)
+    if not st.session_state.revealed:
+        if st.button("일본어 정답 보기", type="primary", use_container_width=True): st.session_state.revealed=True; st.rerun()
+    else:
+        st.markdown(f'<div class="card" style="text-align:center;margin-top:12px"><div class="muted">일본어</div><h2>{card["japanese"]}</h2><p>{card["notes"]}</p></div>', unsafe_allow_html=True)
+        cols = st.columns(3)
+        for col, label, rating in zip(cols, ["못 떠올림", "조금 고민", "바로 나옴"], [0,1,2]):
+            if col.button(label, use_container_width=True, type="primary" if rating==2 else "secondary"):
+                db.record_review(card["id"], rating); st.session_state.review_pos += 1; st.session_state.revealed=False; st.rerun()
+
+
+def study_notes():
+    hero("공부 메모", "수업, 연습, 피드백에서 얻은 공부 메모를 모아보세요.")
+    with st.form("study_note", clear_on_submit=True):
+        a, b = st.columns([1, 2])
+        note_date = a.date_input("날짜", date.today())
+        title = b.text_input("제목 *", placeholder="예: 숫자 통역 시 주의점")
+        content = st.text_area("메모 내용 *", height=180, placeholder="배운 점, 개선할 점, 다음 연습에서 적용할 내용을 기록하세요.")
+        tags = st.text_input("태그", placeholder="숫자, 피드백, 시험전략 (쉼표로 구분)")
+        if st.form_submit_button("메모 저장", type="primary"):
+            if not title.strip() or not content.strip():
+                st.error("제목과 메모 내용을 모두 입력해주세요.")
+            else:
+                db.add_note({"note_date": note_date.isoformat(), "title": title.strip(), "content": content.strip(), "tags": tags.strip()})
+                st.success("공부 메모를 저장했습니다.")
+    st.subheader("메모 모아보기")
+    keyword = st.text_input("메모 검색", placeholder="제목·내용·태그 검색")
+    notes = db.find_notes(keyword)
+    if notes:
+        for note in notes:
+            with st.expander(f"{note['note_date']} · {note['title']}"):
+                st.write(note["content"])
+                if note["tags"]: st.caption(f"태그: {note['tags']}")
+    else:
+        st.info("조건에 맞는 메모가 없습니다.")
+
+
+def statistics():
+    hero("통계", "연습량과 반복되는 약점을 한눈에 확인하세요.")
+    practices = pd.DataFrame(db.all_practices())
+    pairs = pd.DataFrame(db.all_pairs())
+    if practices.empty and pairs.empty: st.info("기록이 쌓이면 통계가 표시됩니다."); return
+    if not practices.empty:
+        totals = practices.groupby("direction")["minutes"].sum().reindex(["KO→JA","JA→KO"], fill_value=0)
+        a,b = st.columns(2); a.metric("KO→JA 누적", f"{totals['KO→JA']}분"); b.metric("JA→KO 누적", f"{totals['JA→KO']}분")
+        st.subheader("방향별 누적 연습시간"); st.bar_chart(totals, horizontal=True)
+        activity_totals = practices.groupby("activity_type")["minutes"].sum().rename(index=ACTIVITY_LABELS)
+        st.subheader("연습 유형별 누적시간"); st.bar_chart(activity_totals, horizontal=True)
+        error_totals = practices[list(ERROR_LABELS)].sum().rename(index=ERROR_LABELS)
+        st.subheader("오류 유형 누적"); st.bar_chart(error_totals.sort_values(ascending=False), horizontal=True)
+        practices["practice_date"] = pd.to_datetime(practices["practice_date"])
+        weekly = practices.set_index("practice_date").groupby("direction")["minutes"].resample("W-MON").sum().unstack(0).fillna(0)
+        st.subheader("주간 연습시간 추이"); st.line_chart(weekly)
+    if not pairs.empty:
+        pairs["created_at"] = pd.to_datetime(pairs["created_at"])
+        daily = pairs.set_index("created_at").resample("D").size().cumsum()
+        st.subheader("신규 언어쌍 누적"); st.line_chart(daily)
+
+
+pages = {"대시보드": dashboard, "연습": practice, "언어쌍": language_pairs, "리뷰": review, "공부 메모": study_notes, "통계": statistics}
+st.sidebar.title("🎧 통역 플래너")
+st.sidebar.caption(f"저장소 · {db.backend_name()}")
+selection = st.sidebar.radio("메뉴", list(pages), label_visibility="collapsed")
+st.sidebar.caption("기본 루틴 · 방향별 동시통역·순차통역, 섀도잉 각 10분")
+pages[selection]()
