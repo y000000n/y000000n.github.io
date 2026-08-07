@@ -23,6 +23,11 @@ script_highlighter_component = (
     components.declare_component("script_highlighter_native_v18", path=str(_component_dir))
     if _component_dir.is_dir() else None
 )
+_material_editor_dir = Path(__file__).with_name("study_material_editor")
+study_material_editor_component = (
+    components.declare_component("study_material_editor_v1", path=str(_material_editor_dir))
+    if _material_editor_dir.is_dir() else None
+)
 
 st.markdown("""
 <style>
@@ -542,6 +547,55 @@ def script_review():
     edit_button("script_reviews", item, [("title","제목"),("script_text","스크립트")], "스크립트 원문을 수정합니다. 원문 위치가 바뀌면 기존 하이라이트 위치도 달라질 수 있습니다.", f"script_{selected_id}")
 
 
+def render_study_material(content_html):
+    components.html(f"""<!doctype html><html lang='ko'><head><meta charset='utf-8'><style>
+    body{{margin:0;padding:22px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#1f2937;font-size:16px;line-height:1.75;overflow-wrap:anywhere}}
+    iframe{{display:block;width:min(100%,760px);aspect-ratio:16/9;height:auto;border:0;border-radius:12px;margin:16px 0;background:#111}} img{{max-width:100%}} a{{color:#315a9c}} h1,h2,h3{{line-height:1.35}}
+    </style></head><body>{content_html}</body></html>""", height=720, scrolling=True)
+
+
+def study_materials():
+    hero("공부 자료", "YouTube 영상과 텍스트 자료를 게시판처럼 작성하고 모아보세요.")
+    if study_material_editor_component is None:
+        st.error("공부 자료 편집기 파일이 없습니다. study_material_editor/index.html을 함께 업로드해주세요.")
+        return
+    with st.expander("새 공부 자료 작성", expanded=not bool(db.all_study_materials())):
+        title = st.text_input("제목 *", key="material_new_title")
+        revision = st.session_state.get("material_editor_revision", 0)
+        content = study_material_editor_component(value="", key=f"material_new_editor_{revision}", default="")
+        if st.button("게시글 저장", type="primary", use_container_width=True, key="material_create"):
+            if not title.strip() or not str(content or "").strip(): st.error("제목과 내용을 입력해주세요.")
+            else:
+                db.add_study_material(title.strip(), str(content))
+                st.session_state["material_editor_revision"] = revision + 1
+                st.success("공부 자료를 저장했습니다."); st.rerun()
+    materials = db.all_study_materials()
+    st.subheader("자료 게시판")
+    if not materials:
+        st.info("아직 저장한 공부 자료가 없습니다."); return
+    board = [{"번호":m["id"], "제목":m["title"], "작성일":str(m.get("created_at", ""))[:10]} for m in materials]
+    st.dataframe(board, use_container_width=True, hide_index=True)
+    selected_id = st.selectbox("열람할 자료", [m["id"] for m in materials], format_func=lambda i: next(m["title"] for m in materials if m["id"] == i))
+    item = next(m for m in materials if m["id"] == selected_id)
+    st.markdown(f"### {item['title']}")
+    st.caption(f"작성일 {str(item.get('created_at',''))[:10]}")
+    render_study_material(item.get("content_html", ""))
+    if st.button("이 게시글 수정", key=f"material_edit_open_{selected_id}"):
+        st.session_state["material_editing"] = selected_id
+    if st.session_state.get("material_editing") == selected_id:
+        with st.container(border=True):
+            edit_title = st.text_input("제목", value=item["title"], key=f"material_title_{selected_id}")
+            edit_content = study_material_editor_component(value=item.get("content_html", ""), key=f"material_editor_{selected_id}", default=item.get("content_html", ""))
+            save, cancel = st.columns(2)
+            if save.button("수정 저장", type="primary", use_container_width=True, key=f"material_save_{selected_id}"):
+                if not edit_title.strip() or not str(edit_content or "").strip(): st.error("제목과 내용을 입력해주세요.")
+                else:
+                    db.update_record("study_materials", selected_id, {"title":edit_title.strip(), "content_html":str(edit_content)})
+                    st.session_state["material_editing"] = None; st.rerun()
+            if cancel.button("취소", use_container_width=True, key=f"material_cancel_{selected_id}"):
+                st.session_state["material_editing"] = None; st.rerun()
+
+
 def statistics():
     hero("통계", "연습량과 반복되는 약점을 한눈에 확인하세요.")
     practices = pd.DataFrame(db.all_practices())
@@ -603,7 +657,7 @@ def records_manager():
                 st.rerun()
 
 
-pages = {"대시보드": dashboard, "통역 연습": practice, "언어쌍": language_pairs, "리뷰": review, "스크립트 피드백": script_feedback, "고유명사·전문용어 추출": terminology_extraction, "스크립트 복습": script_review, "공부 메모": study_notes, "통계": statistics}
+pages = {"대시보드": dashboard, "통역 연습": practice, "언어쌍": language_pairs, "리뷰": review, "스크립트 피드백": script_feedback, "고유명사·전문용어 추출": terminology_extraction, "스크립트 복습": script_review, "공부 자료": study_materials, "공부 메모": study_notes, "통계": statistics}
 st.sidebar.title("🎧 통역 플래너")
 st.sidebar.caption(f"저장소 · {db.backend_name()}")
 selection = st.sidebar.radio("메뉴", list(pages), label_visibility="collapsed")

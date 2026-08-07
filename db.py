@@ -189,6 +189,13 @@ def init_db(db_path: Path | str = DB_PATH) -> None:
                 direction TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
+            CREATE TABLE IF NOT EXISTS study_materials (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                content_html TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
             """
         )
         practice_columns = {row["name"] for row in conn.execute("PRAGMA table_info(practices)")}
@@ -290,6 +297,19 @@ def add_script_feedback(values: dict, db_path: Path | str = DB_PATH) -> int:
         "INSERT INTO script_feedbacks(feedback_date,interpretation_type,direction,title,source_script,interpreted_script,feedback) VALUES(?,?,?,?,?,?,?)",
         tuple(values[k] for k in ("feedback_date","interpretation_type","direction","title","source_script","interpreted_script","feedback")), db_path,
     )
+
+
+def add_study_material(title: str, content_html: str, db_path: Path | str = DB_PATH) -> int:
+    payload = {"title": title, "content_html": content_html}
+    remote = _remote_client()
+    if remote: return remote.table("study_materials").insert(payload).execute().data[0]["id"]
+    return execute("INSERT INTO study_materials(title,content_html) VALUES(?,?)", (title, content_html), db_path)
+
+
+def all_study_materials(db_path: Path | str = DB_PATH):
+    remote = _remote_client()
+    if remote: return remote.table("study_materials").select("*").order("id", desc=True).execute().data
+    return query("SELECT * FROM study_materials ORDER BY id DESC", db_path=db_path)
 
 
 def record_review(pair_id: int, rating: int, db_path: Path | str = DB_PATH) -> None:
@@ -423,6 +443,7 @@ EDITABLE_COLUMNS = {
     "language_pairs": {"korean","japanese","pair_type","source","notes","mastery"},
     "study_notes": {"note_date","title","content","tags"},
     "script_feedbacks": {"feedback_date","interpretation_type","direction","title","source_script","interpreted_script","feedback"},
+    "study_materials": {"title","content_html"},
     "script_reviews": {"title","script_text","highlights"},
     "settings": {"value"},
 }
