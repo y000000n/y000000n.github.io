@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+import json
 import re
+import ssl
 from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 import pandas as pd
+import certifi
 import streamlit as st
 import streamlit.components.v1 as components
 
@@ -360,8 +365,90 @@ def analyze_scripts(source: str, interpreted: str) -> str:
     return "\n".join(f"• {x}" for x in notes)
 
 
+def openai_api_key():
+    try:
+        return str(st.secrets.get("OPENAI_API_KEY", "")).strip()
+    except Exception:
+        return ""
+
+
+def analyze_scripts_ai(source, interpreted, direction, interpretation_type):
+    api_key = openai_api_key()
+    if not api_key:
+        raise ValueError("Streamlit Secrets에 OPENAI_API_KEY가 없습니다.")
+    schema = {
+        "type":"object", "additionalProperties":False,
+        "properties":{
+            "overall_score":{"type":"integer","minimum":0,"maximum":100},
+            "summary":{"type":"string"},
+            "strengths":{"type":"array","items":{"type":"string"}},
+            "priorities":{"type":"array","items":{"type":"string"}},
+            "sentences":{"type":"array","items":{"type":"object","additionalProperties":False,"properties":{
+                "number":{"type":"integer"}, "source":{"type":"string"}, "interpreted":{"type":"string"},
+                "status":{"type":"string","enum":["정확","부분 누락","중요 누락","오역","추가/왜곡","대응 없음"]},
+                "accuracy_score":{"type":"integer","minimum":0,"maximum":100},
+                "omissions":{"type":"array","items":{"type":"string"}},
+                "meaning_errors":{"type":"array","items":{"type":"string"}},
+                "expression_feedback":{"type":"array","items":{"type":"string"}},
+                "fluency_feedback":{"type":"array","items":{"type":"string"}},
+                "better_interpretation":{"type":"string"}
+            },"required":["number","source","interpreted","status","accuracy_score","omissions","meaning_errors","expression_feedback","fluency_feedback","better_interpretation"]}}
+        }, "required":["overall_score","summary","strengths","priorities","sentences"]
+    }
+    instructions = """당신은 한국어-일본어 통역대학원 교수다. 원문과 학습자의 실제 통역문을 의미 단위별로 정렬하여 한 문장씩 엄격하게 평가한다. 문장 수가 다르면 1:N 또는 N:1 대응도 허용하되 같은 내용을 중복 평가하지 않는다. 핵심 주장, 주체, 대상, 부정, 시제, 인과·대조·조건, 수치, 고유명사의 누락·추가·왜곡을 구체적으로 적는다. 단순 직역 차이는 오역으로 보지 않는다. 통역문의 음, 어, えー, あの, 반복, 자기수정, 문장 미완결, 장시간 멈춤을 암시하는 표기를 fluency_feedback에 반드시 기록한다. 표현이 어색하거나 문맥에 맞지 않으면 자연스럽고 즉시 말할 수 있는 개선안을 제시한다. 근거 없는 오류를 만들지 말고, 문제가 없으면 해당 배열을 비운다. 모든 피드백은 한국어로 쓴다."""
+    user_text = f"통역 유형: {interpretation_type}\n방향: {direction}\n\n[원문]\n{source}\n\n[실제 통역문]\n{interpreted}"
+    payload = {"model":"gpt-5.4-mini","input":[{"role":"system","content":[{"type":"input_text","text":instructions}]},{"role":"user","content":[{"type":"input_text","text":user_text}]}],"reasoning":{"effort":"medium"},"text":{"format":{"type":"json_schema","name":"interpretation_feedback","strict":True,"schema":schema}}}
+    request = Request("https://api.openai.com/v1/responses", data=json.dumps(payload).encode("utf-8"), headers={"Authorization":f"Bearer {api_key}","Content-Type":"application/json"}, method="POST")
+    try:
+        with urlopen(request, timeout=180, context=ssl.create_default_context(cafile=certifi.where())) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")
+        raise RuntimeError(f"OpenAI API 오류({exc.code}): {detail[:400]}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"OpenAI API 연결 실패: {exc.reason}") from exc
+    output_text = ""
+    for item in data.get("output", []):
+        if item.get("type") == "message":
+            for content in item.get("content", []):
+                if content.get("type") == "output_text": output_text += content.get("text", "")
+    if not output_text: raise RuntimeError("AI 분석 결과가 비어 있습니다.")
+    return json.loads(output_text)
+
+
+def show_script_analysis(result):
+    if isinstance(result, str):
+        try: result = json.loads(result)
+        except Exception: st.text(result); return
+    st.metric("종합 정확도", f"{result.get('overall_score', 0)}점")
+    st.write(result.get("summary", ""))
+    a, b = st.columns(2)
+    with a:
+        st.markdown("**잘한 점**")
+        for x in result.get("strengths", []): st.write(f"• {x}")
+    with b:
+        st.markdown("**우선 개선할 점**")
+        for x in result.get("priorities", []): st.write(f"• {x}")
+    st.markdown("#### 문장별 비교")
+    for row in result.get("sentences", []):
+        with st.container(border=True):
+            h1, h2 = st.columns([1,4])
+            h1.markdown(f"**#{row['number']} · {row['status']}**")
+            h2.progress(row["accuracy_score"] / 100, text=f"정확도 {row['accuracy_score']}점")
+            left, right = st.columns(2)
+            left.markdown("**원문**"); left.write(row["source"] or "—")
+            right.markdown("**실제 통역**"); right.write(row["interpreted"] or "—")
+            details = []
+            for label, field in [("누락","omissions"),("의미 오류","meaning_errors"),("표현","expression_feedback"),("유창성","fluency_feedback")]:
+                if row.get(field): details.append(f"**{label}:** " + " / ".join(row[field]))
+            if details: st.markdown("  \n".join(details))
+            if row.get("better_interpretation"): st.success(f"개선 예시: {row['better_interpretation']}")
+
+
 def script_feedback():
-    hero("스크립트 피드백", "원문과 실제 통역문을 비교해 기본 셀프피드백을 만들고 저장하세요.")
+    hero("스크립트 피드백", "AI가 원문과 실제 통역문을 문장별로 정렬해 누락·오역·표현·유창성을 분석합니다.")
+    if not openai_api_key():
+        st.warning("AI 분석을 사용하려면 Streamlit Secrets에 OPENAI_API_KEY를 등록해야 합니다.")
     with st.form("script_feedback"):
         a,b,c = st.columns(3)
         feedback_date = a.date_input("날짜", date.today())
@@ -375,17 +462,22 @@ def script_feedback():
             if not title.strip() or not source_script.strip() or not interpreted_script.strip():
                 st.error("제목과 두 스크립트를 모두 입력해주세요.")
             else:
-                result = analyze_scripts(source_script, interpreted_script)
-                db.add_script_feedback({"feedback_date":feedback_date.isoformat(), "interpretation_type":interpretation_type, "direction":direction, "title":title.strip(), "source_script":source_script.strip(), "interpreted_script":interpreted_script.strip(), "feedback":result})
-                st.session_state["latest_script_feedback"] = result
-                st.success("분석 결과를 저장했습니다.")
+                try:
+                    with st.spinner("문장별 의미와 표현을 분석하고 있습니다…"):
+                        result = analyze_scripts_ai(source_script.strip(), interpreted_script.strip(), direction, interpretation_type)
+                    saved = json.dumps(result, ensure_ascii=False)
+                    db.add_script_feedback({"feedback_date":feedback_date.isoformat(), "interpretation_type":interpretation_type, "direction":direction, "title":title.strip(), "source_script":source_script.strip(), "interpreted_script":interpreted_script.strip(), "feedback":saved})
+                    st.session_state["latest_script_feedback"] = result
+                    st.success("문장별 AI 분석 결과를 저장했습니다.")
+                except Exception as exc:
+                    st.error(str(exc))
     if st.session_state.get("latest_script_feedback"):
-        st.subheader("이번 분석 결과"); st.text(st.session_state["latest_script_feedback"])
+        st.subheader("이번 분석 결과"); show_script_analysis(st.session_state["latest_script_feedback"])
     st.subheader("저장된 피드백")
     feedback_items = db.all_script_feedbacks()[:20]
     for item in feedback_items:
         with st.expander(f"{item['feedback_date']} · {item['interpretation_type']} {item['direction']} · {item['title']}"):
-            st.text(item["feedback"])
+            show_script_analysis(item["feedback"])
     if feedback_items:
         st.markdown("#### 기록 수정")
         selected_record_editor("script_feedbacks", feedback_items, [("feedback_date","날짜"),("interpretation_type","통역 유형"),("direction","방향"),("title","제목"),("source_script","대상 스크립트"),("interpreted_script","실제 통역 스크립트"),("feedback","피드백")], lambda r: f"{r['feedback_date']} · {r['interpretation_type']} {r['direction']} · {r['title']}", "feedback")

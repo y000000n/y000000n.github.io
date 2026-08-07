@@ -38,3 +38,13 @@ streamlit run app.py
 `.streamlit/secrets.toml`로 복사하고 프로젝트 URL과 Secret key를 입력하세요. 실제 secrets 파일은
 GitHub이나 채팅에 공유하지 마세요. 현재 V1은 계속 SQLite를 사용하며, 온라인 저장소 전환 버전에서
 이 설정을 사용합니다. Supabase 연결은 Python 기본 REST 기능을 사용하므로 별도의 Supabase 패키지를 설치할 필요가 없습니다.
+
+## 문장별 AI 스크립트 피드백
+
+Streamlit Cloud의 앱 설정에서 **Secrets**를 열고 기존 Supabase 설정 아래에 다음 항목을 추가하세요.
+
+```toml
+OPENAI_API_KEY = "sk-..."
+```
+
+API 키는 앱 코드나 GitHub에 올리지 마세요. 스크립트 피드백을 실행하면 원문과 실제 통역문이 분석을 위해 OpenAI API로 전송되며, API 사용량에 따른 비용이 발생할 수 있습니다. 분석 결과만 앱의 기존 `script_feedbacks` 기록에 저장됩니다.
