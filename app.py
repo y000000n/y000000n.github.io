@@ -294,7 +294,45 @@ def statistics():
         st.subheader("신규 언어쌍 누적"); st.line_chart(daily)
 
 
-pages = {"대시보드": dashboard, "연습": practice, "언어쌍": language_pairs, "리뷰": review, "스크립트 피드백": script_feedback, "공부 메모": study_notes, "통계": statistics}
+def records_manager():
+    hero("기록 수정", "저장한 데이터를 표에서 고친 뒤 변경사항을 저장하세요.")
+    specs = [
+        ("연습", "practices", "id", {"practice_date":"날짜","activity_type":"유형","direction":"방향","title":"자료 제목","topic":"주제","source_url":"URL","video_speed":"속도","minutes":"분","difficulty":"난이도","omission":"내용 누락","number_omission":"숫자 누락","logic_error":"논리 오류","expression_block":"표현 막힘","unnatural_expression":"부자연스러운 표현","other_notes":"메모"}),
+        ("언어쌍", "language_pairs", "id", {"korean":"한국어","japanese":"일본어","pair_type":"유형","source":"출처","notes":"메모","mastery":"숙지도"}),
+        ("공부 메모", "study_notes", "id", {"note_date":"날짜","title":"제목","content":"내용","tags":"태그"}),
+        ("스크립트 피드백", "script_feedbacks", "id", {"feedback_date":"날짜","interpretation_type":"통역 유형","direction":"방향","title":"제목","source_script":"대상 스크립트","interpreted_script":"실제 통역 스크립트","feedback":"피드백"}),
+        ("목표 설정", "settings", "key", {"value":"설정값"}),
+    ]
+    tabs = st.tabs([x[0] for x in specs])
+    for tab, (label, table, id_column, mapping) in zip(tabs, specs):
+        with tab:
+            rows = db.table_rows(table)
+            if not rows:
+                st.info("수정할 기록이 없습니다."); continue
+            visible = [{id_column:r[id_column], **{kr:r.get(en, "") for en,kr in mapping.items()}} for r in rows]
+            frame = pd.DataFrame(visible)
+            config = {id_column: (st.column_config.TextColumn("설정", disabled=True) if table == "settings" else st.column_config.NumberColumn("ID", disabled=True))}
+            if table == "practices":
+                config.update({"유형":st.column_config.SelectboxColumn("유형", options=list(ACTIVITY_LABELS.values()), required=True), "방향":st.column_config.SelectboxColumn("방향", options=["KO→JA","JA→KO"], required=True), "속도":st.column_config.NumberColumn("속도", min_value=.7, max_value=1.0, step=.05)})
+                frame["유형"] = frame["유형"].map(lambda x: ACTIVITY_LABELS.get(x,x))
+            elif table == "language_pairs":
+                config.update({"유형":st.column_config.SelectboxColumn("유형", options=list(TYPE_LABELS.values()), required=True), "숙지도":st.column_config.NumberColumn("숙지도", min_value=1, max_value=5, step=1)})
+                frame["유형"] = frame["유형"].map(lambda x: TYPE_LABELS.get(x,x))
+            elif table == "script_feedbacks":
+                config.update({"통역 유형":st.column_config.SelectboxColumn("통역 유형", options=["동시통역","순차통역"]), "방향":st.column_config.SelectboxColumn("방향", options=["KO→JA","JA→KO"])})
+            edited = st.data_editor(frame, use_container_width=True, hide_index=True, num_rows="fixed", column_config=config, key=f"editor_{table}")
+            if st.button(f"{label} 변경사항 저장", type="primary", key=f"save_{table}"):
+                reverse = {kr:en for en,kr in mapping.items()}
+                for record in edited.to_dict("records"):
+                    values = {reverse[k]: v for k,v in record.items() if k in reverse}
+                    if table == "practices": values["activity_type"] = next((k for k,v in ACTIVITY_LABELS.items() if v==values["activity_type"]), values["activity_type"])
+                    if table == "language_pairs": values["pair_type"] = next((k for k,v in TYPE_LABELS.items() if v==values["pair_type"]), values["pair_type"])
+                    db.update_record(table, record[id_column], values)
+                st.success(f"{label} 기록을 수정했습니다.")
+                st.rerun()
+
+
+pages = {"대시보드": dashboard, "연습": practice, "언어쌍": language_pairs, "리뷰": review, "스크립트 피드백": script_feedback, "공부 메모": study_notes, "기록 수정": records_manager, "통계": statistics}
 st.sidebar.title("🎧 통역 플래너")
 st.sidebar.caption(f"저장소 · {db.backend_name()}")
 selection = st.sidebar.radio("메뉴", list(pages), label_visibility="collapsed")
