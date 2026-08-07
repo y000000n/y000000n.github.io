@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 import json
+import random
 import re
 import ssl
 from pathlib import Path
@@ -372,10 +373,22 @@ def openai_api_key():
         return ""
 
 
-def analyze_scripts_ai(source, interpreted, direction, interpretation_type):
+def call_openai_structured(instructions, user_text, schema, name, effort="low"):
     api_key = openai_api_key()
-    if not api_key:
-        raise ValueError("Streamlit Secrets에 OPENAI_API_KEY가 없습니다.")
+    if not api_key: raise ValueError("Streamlit Secrets에 OPENAI_API_KEY가 없습니다.")
+    payload = {"model":"gpt-5.4-mini","input":[{"role":"system","content":[{"type":"input_text","text":instructions}]},{"role":"user","content":[{"type":"input_text","text":user_text}]}],"reasoning":{"effort":effort},"text":{"format":{"type":"json_schema","name":name,"strict":True,"schema":schema}}}
+    request = Request("https://api.openai.com/v1/responses", data=json.dumps(payload).encode("utf-8"), headers={"Authorization":f"Bearer {api_key}","Content-Type":"application/json"}, method="POST")
+    try:
+        with urlopen(request, timeout=180, context=ssl.create_default_context(cafile=certifi.where())) as response: data = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace"); raise RuntimeError(f"OpenAI API 오류({exc.code}): {detail[:400]}") from exc
+    except URLError as exc: raise RuntimeError(f"OpenAI API 연결 실패: {exc.reason}") from exc
+    output_text = "".join(content.get("text", "") for item in data.get("output", []) if item.get("type") == "message" for content in item.get("content", []) if content.get("type") == "output_text")
+    if not output_text: raise RuntimeError("AI 분석 결과가 비어 있습니다.")
+    return json.loads(output_text)
+
+
+def analyze_scripts_ai(source, interpreted, direction, interpretation_type):
     schema = {
         "type":"object", "additionalProperties":False,
         "properties":{
@@ -397,23 +410,7 @@ def analyze_scripts_ai(source, interpreted, direction, interpretation_type):
     }
     instructions = """당신은 한국어-일본어 통역대학원 교수다. 원문과 학습자의 실제 통역문을 의미 단위별로 정렬하여 한 문장씩 엄격하게 평가한다. 문장 수가 다르면 1:N 또는 N:1 대응도 허용하되 같은 내용을 중복 평가하지 않는다. 핵심 주장, 주체, 대상, 부정, 시제, 인과·대조·조건, 수치, 고유명사의 누락·추가·왜곡을 구체적으로 적는다. 단순 직역 차이는 오역으로 보지 않는다. 통역문의 음, 어, えー, あの, 반복, 자기수정, 문장 미완결, 장시간 멈춤을 암시하는 표기를 fluency_feedback에 반드시 기록한다. 표현이 어색하거나 문맥에 맞지 않으면 자연스럽고 즉시 말할 수 있는 개선안을 제시한다. 근거 없는 오류를 만들지 말고, 문제가 없으면 해당 배열을 비운다. 모든 피드백은 한국어로 쓴다."""
     user_text = f"통역 유형: {interpretation_type}\n방향: {direction}\n\n[원문]\n{source}\n\n[실제 통역문]\n{interpreted}"
-    payload = {"model":"gpt-5.4-mini","input":[{"role":"system","content":[{"type":"input_text","text":instructions}]},{"role":"user","content":[{"type":"input_text","text":user_text}]}],"reasoning":{"effort":"medium"},"text":{"format":{"type":"json_schema","name":"interpretation_feedback","strict":True,"schema":schema}}}
-    request = Request("https://api.openai.com/v1/responses", data=json.dumps(payload).encode("utf-8"), headers={"Authorization":f"Bearer {api_key}","Content-Type":"application/json"}, method="POST")
-    try:
-        with urlopen(request, timeout=180, context=ssl.create_default_context(cafile=certifi.where())) as response:
-            data = json.loads(response.read().decode("utf-8"))
-    except HTTPError as exc:
-        detail = exc.read().decode("utf-8", "replace")
-        raise RuntimeError(f"OpenAI API 오류({exc.code}): {detail[:400]}") from exc
-    except URLError as exc:
-        raise RuntimeError(f"OpenAI API 연결 실패: {exc.reason}") from exc
-    output_text = ""
-    for item in data.get("output", []):
-        if item.get("type") == "message":
-            for content in item.get("content", []):
-                if content.get("type") == "output_text": output_text += content.get("text", "")
-    if not output_text: raise RuntimeError("AI 분석 결과가 비어 있습니다.")
-    return json.loads(output_text)
+    return call_openai_structured(instructions, user_text, schema, "interpretation_feedback", "medium")
 
 
 def show_script_analysis(result):
@@ -445,6 +442,44 @@ def show_script_analysis(result):
             if row.get("better_interpretation"): st.success(f"개선 예시: {row['better_interpretation']}")
 
 
+def is_ai_feedback(value):
+    try:
+        parsed = json.loads(value) if isinstance(value, str) else value
+        return isinstance(parsed, dict) and isinstance(parsed.get("sentences"), list)
+    except Exception:
+        return False
+
+
+def extract_terms_ai(text):
+    schema = {"type":"object","additionalProperties":False,"properties":{"terms":{"type":"array","items":{"type":"object","additionalProperties":False,"properties":{"term":{"type":"string"},"category":{"type":"string","enum":["고유명사","전문용어"]},"context":{"type":"string"},"position":{"type":"integer"}},"required":["term","category","context","position"]}}},"required":["terms"]}
+    instructions = """입력 텍스트에서 통역 전에 준비할 가치가 있는 고유명사와 전문용어만 추출한다. 국가명, 수도명, 널리 알려진 국제기구 약칭, 대통령·국회·경제·금리 같은 기초 시사용어, 일반 명사는 제외한다. 인명·기관명·법률명·정책명·사업명·협정명·기술명·학술 개념처럼 고유하거나 전문성이 있는 항목만 남긴다. 중복은 하나로 합치고 term은 원문 표기를 유지한다. context에는 짧은 문맥 또는 의미를 한국어로 적고, position에는 텍스트에서 처음 등장한 문자 위치에 가까운 정수를 넣는다."""
+    return call_openai_structured(instructions, text, schema, "terminology_extraction", "low").get("terms", [])
+
+
+def terminology_extraction():
+    hero("고유명사·전문용어 추출", "AI가 통역 준비에 필요한 고유명사와 전문용어만 골라 정리합니다.")
+    if not openai_api_key(): st.warning("Streamlit Secrets에 OPENAI_API_KEY를 등록해야 합니다.")
+    mode = st.segmented_control("통역 방식", ["동시통역", "순차통역"], default="동시통역")
+    st.caption("동시통역은 원문 등장 순서, 순차통역은 순서를 섞어 표시합니다.")
+    text = st.text_area("분석할 텍스트", height=360, placeholder="기사, 연설문 또는 수업 자료를 붙여넣으세요.")
+    if st.button("용어 추출", type="primary", use_container_width=True):
+        if not text.strip(): st.error("분석할 텍스트를 입력해주세요.")
+        else:
+            try:
+                with st.spinner("고유명사와 전문용어를 추출하고 있습니다…"):
+                    terms = extract_terms_ai(text.strip())
+                terms.sort(key=lambda x: x.get("position", 0))
+                if mode == "순차통역": random.SystemRandom().shuffle(terms)
+                st.session_state["extracted_terms"] = terms
+                st.session_state["extracted_terms_mode"] = mode
+            except Exception as exc: st.error(str(exc))
+    terms = st.session_state.get("extracted_terms", [])
+    if terms:
+        st.subheader(f"추출 결과 · {len(terms)}개")
+        shown = [{"번호":i, "용어":item["term"], "구분":item["category"], "문맥·의미":item["context"]} for i,item in enumerate(terms, 1)]
+        st.dataframe(shown, use_container_width=True, hide_index=True)
+
+
 def script_feedback():
     hero("스크립트 피드백", "AI가 원문과 실제 통역문을 문장별로 정렬해 누락·오역·표현·유창성을 분석합니다.")
     if not openai_api_key():
@@ -474,9 +509,10 @@ def script_feedback():
     if st.session_state.get("latest_script_feedback"):
         st.subheader("이번 분석 결과"); show_script_analysis(st.session_state["latest_script_feedback"])
     st.subheader("저장된 피드백")
-    feedback_items = db.all_script_feedbacks()[:20]
+    feedback_items = sorted(db.all_script_feedbacks(), key=lambda item: int(item.get("id", 0)), reverse=True)[:20]
     for item in feedback_items:
-        with st.expander(f"{item['feedback_date']} · {item['interpretation_type']} {item['direction']} · {item['title']}"):
+        kind = "AI 상세 분석" if is_ai_feedback(item.get("feedback", "")) else "기존 기본 분석"
+        with st.expander(f"{item['feedback_date']} · {item['interpretation_type']} {item['direction']} · {item['title']} · {kind}"):
             show_script_analysis(item["feedback"])
     if feedback_items:
         st.markdown("#### 기록 수정")
@@ -567,7 +603,7 @@ def records_manager():
                 st.rerun()
 
 
-pages = {"대시보드": dashboard, "통역 연습": practice, "언어쌍": language_pairs, "리뷰": review, "스크립트 피드백": script_feedback, "스크립트 복습": script_review, "공부 메모": study_notes, "통계": statistics}
+pages = {"대시보드": dashboard, "통역 연습": practice, "언어쌍": language_pairs, "리뷰": review, "스크립트 피드백": script_feedback, "고유명사·전문용어 추출": terminology_extraction, "스크립트 복습": script_review, "공부 메모": study_notes, "통계": statistics}
 st.sidebar.title("🎧 통역 플래너")
 st.sidebar.caption(f"저장소 · {db.backend_name()}")
 selection = st.sidebar.radio("메뉴", list(pages), label_visibility="collapsed")

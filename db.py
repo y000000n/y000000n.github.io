@@ -383,7 +383,7 @@ def find_notes(term=""):
 
 def all_script_feedbacks():
     remote = _remote_client()
-    if remote: return remote.table("script_feedbacks").select("*").order("feedback_date", desc=True).execute().data
+    if remote: return remote.table("script_feedbacks").select("*").order("id", desc=True).execute().data
     return query("SELECT * FROM script_feedbacks ORDER BY feedback_date DESC,id DESC")
 
 
