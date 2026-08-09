@@ -1001,12 +1001,39 @@ def tts_page():
     language = st.segmented_control("언어", ["한국어", "일본어"], default="한국어", key="tts_language")
     target_label = "1,200자당 6분 · 분당 200자" if language == "한국어" else "1,000자당 6분 · 분당 약 167자"
     st.caption(f"기준 속도 · {target_label} · 글자 수는 공백을 제외하고 계산합니다.")
+    st.markdown("#### 기사에서 본문 불러오기")
+    url_col, load_col = st.columns([5, 1])
+    article_url = url_col.text_input(
+        "기사 URL",
+        placeholder="https://…",
+        key="tts_article_url",
+        label_visibility="collapsed",
+        help="공개된 한국어·일본어 기사 URL을 입력하세요. 로그인·유료벽이 있는 기사는 직접 붙여넣기가 필요할 수 있습니다.",
+    )
+    if load_col.button("본문 불러오기", type="secondary", use_container_width=True, key="tts_load_article"):
+        if not article_url.strip():
+            st.error("기사 URL을 입력해주세요.")
+        else:
+            try:
+                with st.spinner("기사 본문을 불러오고 있습니다…"):
+                    article = fetch_article_text(article_url.strip())
+                st.session_state["tts_text"] = article["text"]
+                st.session_state["tts_article_title"] = article.get("title", "")
+                st.session_state["tts_article_loaded"] = True
+            except Exception as exc:
+                st.error(str(exc))
+    if st.session_state.pop("tts_article_loaded", False):
+        title = st.session_state.get("tts_article_title", "").strip()
+        st.success(f"기사 본문을 불러왔습니다{f': {title}' if title else '.'}")
+    loaded_title = st.session_state.get("tts_article_title", "").strip()
+    if loaded_title and st.session_state.get("tts_text", "").strip():
+        st.caption(f"불러온 기사 · {loaded_title}")
     text = st.text_area("읽을 텍스트", height=320, placeholder="한국어 또는 일본어 스크립트를 입력하세요.", key="tts_text")
     character_count, target_seconds = tts_target_duration(text, language)
     a, b = st.columns(2)
     a.metric("공백 제외 글자 수", f"{character_count:,}자")
     b.metric("기준 재생시간", _format_duration(target_seconds))
-    st.caption("음성 생성 전에 한국어 기사체는 -ㅂ니다/-습니다체로, 일본어 だ・である체는 です・ます調로 자동 변환합니다. 한 번에 최대 4,000자까지 생성할 수 있습니다.")
+    st.caption("불러온 본문은 직접 수정할 수 있습니다. 음성 생성 전에 한국어 기사체는 -ㅂ니다/-습니다체로, 일본어 だ・である체는 です・ます調로 자동 변환합니다. 한 번에 최대 4,000자까지 생성할 수 있습니다.")
     if st.button("음성 생성", type="primary", use_container_width=True, key="tts_generate"):
         clean_text = text.strip()
         if not clean_text or character_count == 0:
