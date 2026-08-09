@@ -1109,7 +1109,7 @@ def render_paced_tts_player(audio_segments, target_seconds, language, character_
     button.secondary{{background:#eef2f8;color:#315a9c}}input[type=range]{{flex:1;accent-color:#315a9c}}
     .time{{font-variant-numeric:tabular-nums;font-size:13px;min-width:92px;text-align:right}}.status{{margin-top:11px;font-size:13px;color:#475467}}
     </style></head><body><div class="player">
-    <div class="meta">{language} · 공백 제외 {character_count:,}자 · 시험 기준 {standard} · 발화 1.0배속</div>
+    <div class="meta">{language} · 공백 제외 {character_count:,}자 · 시험 기준 {standard} · 자연스러운 휴지 우선</div>
     <div class="controls"><button id="toggle">▶ 재생</button><button id="reset" class="secondary">처음으로</button><input id="seek" type="range" min="0" max="1000" value="0"><span id="time" class="time">0:00 / --:--</span></div>
     <div id="status" class="status">각 구절의 음성 길이를 측정하고 시험 기준에 맞춰 휴지를 계산하는 중입니다…</div>
     </div><script>
@@ -1117,25 +1117,30 @@ def render_paced_tts_player(audio_segments, target_seconds, language, character_
     const probes=items.map(item=>{{const audio=new Audio(item.src);audio.preload='metadata';return audio;}});
     const player=new Audio();player.preload='auto';player.playbackRate=1;
     const toggle=document.getElementById('toggle'), reset=document.getElementById('reset'),seek=document.getElementById('seek'),time=document.getElementById('time'),status=document.getElementById('status');
-    const target={float(target_seconds):.4f};let durations=[],gaps=[],total=target,index=0,phase='idle',playing=false,pauseProgress=0,pauseStarted=0,pauseTimer=null,ready=false;
+    const target={float(target_seconds):.4f};let mediaDurations=[],durations=[],gaps=[],speechRate=1,total=target,index=0,phase='idle',playing=false,pauseProgress=0,pauseStarted=0,pauseTimer=null,ready=false;
     const clock=(s)=>{{s=Math.max(0,Math.round(s||0));return `${{Math.floor(s/60)}}:${{String(s%60).padStart(2,'0')}}`;}};
     const before=(i)=>durations.slice(0,i).reduce((a,b)=>a+b,0)+gaps.slice(0,i).reduce((a,b)=>a+b,0);
-    const position=()=>{{if(index>=items.length)return total;const base=before(index);if(phase==='pause')return base+durations[index]+pauseProgress+(playing?(performance.now()-pauseStarted)/1000:0);return base+(player.currentTime||0);}};
+    const position=()=>{{if(index>=items.length)return total;const base=before(index);if(phase==='pause')return base+durations[index]+pauseProgress+(playing?(performance.now()-pauseStarted)/1000:0);return base+(player.currentTime||0)/speechRate;}};
     const update=()=>{{const current=Math.min(total,position());time.textContent=`${{clock(current)}} / ${{clock(total)}}`;seek.value=total?Math.round(current/total*1000):0;}};
     const stopTimer=()=>{{if(pauseTimer)clearTimeout(pauseTimer);pauseTimer=null;}};
     const finishAll=()=>{{playing=false;phase='ended';index=items.length;toggle.textContent='▶ 다시 재생';update();}};
-    const loadCurrent=(offset,shouldPlay)=>{{if(index>=items.length){{finishAll();return}}phase='audio';const begin=()=>{{player.currentTime=Math.min(Math.max(0,offset||0),Math.max(0,durations[index]-.02));player.playbackRate=1;if(shouldPlay)player.play().catch(()=>{{playing=false;toggle.textContent='▶ 재생';status.textContent='재생이 차단되었습니다. 재생 버튼을 다시 눌러주세요.';}});}};if(player.dataset.index!==String(index)){{player.dataset.index=String(index);player.src=items[index].src;player.load();if(player.readyState>=1)begin();else player.addEventListener('loadedmetadata',begin,{{once:true}});}}else begin();if(shouldPlay)toggle.textContent='❚❚ 일시정지';}};
-    const playCurrent=()=>loadCurrent(player.dataset.index===String(index)?player.currentTime:0,true);
+    const loadCurrent=(offset,shouldPlay)=>{{if(index>=items.length){{finishAll();return}}phase='audio';const begin=()=>{{player.currentTime=Math.min(Math.max(0,(offset||0)*speechRate),Math.max(0,mediaDurations[index]-.02));player.playbackRate=speechRate;if(shouldPlay)player.play().catch(()=>{{playing=false;toggle.textContent='▶ 재생';status.textContent='재생이 차단되었습니다. 재생 버튼을 다시 눌러주세요.';}});}};if(player.dataset.index!==String(index)){{player.dataset.index=String(index);player.src=items[index].src;player.load();if(player.readyState>=1)begin();else player.addEventListener('loadedmetadata',begin,{{once:true}});}}else begin();if(shouldPlay)toggle.textContent='❚❚ 일시정지';}};
+    const playCurrent=()=>loadCurrent(player.dataset.index===String(index)?player.currentTime/speechRate:0,true);
     const schedulePause=()=>{{phase='pause';pauseStarted=performance.now();const remaining=Math.max(0,gaps[index]-pauseProgress);pauseTimer=setTimeout(()=>{{pauseProgress=0;index+=1;if(playing)playCurrent();}},remaining*1000);}};
     player.addEventListener('timeupdate',update);player.addEventListener('ended',()=>{{pauseProgress=0;if(gaps[index]>0&&playing)schedulePause();else{{index+=1;if(playing)playCurrent();}}}});
     Promise.all(probes.map(audio=>new Promise((resolve,reject)=>{{if(audio.readyState>=1)resolve();else{{audio.addEventListener('loadedmetadata',resolve,{{once:true}});audio.addEventListener('error',reject,{{once:true}});}}}}))).then(()=>{{
-      durations=probes.map(audio=>audio.duration);const speech=durations.reduce((a,b)=>a+b,0);const available=Math.max(0,target-speech);
-      const base=items.map((item,i)=>i === items.length - 1 ? 0.35 : (item.boundary==='paragraph'?1.8:item.boundary==='sentence'?1.35:0.7));
-      const baseTotal=base.reduce((a,b)=>a+b,0);const minimum=baseTotal>available&&baseTotal?base.map(x=>x*available/baseTotal):base;
-      const remaining=Math.max(0,available-minimum.reduce((a,b)=>a+b,0));
-      const weights=items.map((item,i)=>Math.sqrt(Math.max(1,item.characters))*(i === items.length - 1 ? 0.35 : item.boundary==='paragraph'?2.2:item.boundary==='sentence'?1.65:1));const weightTotal=weights.reduce((a,b)=>a+b,0)||1;
-      gaps=minimum.map((value,i)=>value+remaining*weights[i]/weightTotal);total=speech+gaps.reduce((a,b)=>a+b,0);ready=true;
-      const equivalent={character_count}/(total/60);status.textContent=`시험 기준 재생시간 ${{clock(target)}} · 실제 ${{clock(total)}} · 분당 ${{equivalent.toFixed(1)}}자 · ${{items.length}}개 의미 구절의 가변 휴지`;update();
+      mediaDurations=probes.map(audio=>audio.duration);const naturalSpeech=mediaDurations.reduce((a,b)=>a+b,0);
+      const minimum=items.map((item,i)=>i===items.length-1?0.25:(item.boundary==='paragraph'?1.35:item.boundary==='sentence'?1.05:0.5));
+      const caps=items.map((item,i)=>{{if(i===items.length-1)return 0.35;const lengthPart=Math.min(0.65,Math.max(0,item.characters-8)*0.035);return (item.boundary==='paragraph'?2.75:item.boundary==='sentence'?2.25:1.35)+lengthPart;}});
+      const capTotal=caps.reduce((a,b)=>a+b,0);const desiredSpeech=Math.max(naturalSpeech,target-capTotal);
+      speechRate=Math.min(1,Math.max(0.8,naturalSpeech/Math.max(0.01,desiredSpeech)));
+      durations=mediaDurations.map(value=>value/speechRate);const speech=durations.reduce((a,b)=>a+b,0);const available=Math.max(0,target-speech);
+      const minTotal=minimum.reduce((a,b)=>a+b,0);gaps=minTotal>available&&minTotal?minimum.map(value=>value*available/minTotal):minimum.slice();
+      let remaining=Math.max(0,available-gaps.reduce((a,b)=>a+b,0));
+      for(let pass=0;pass<8&&remaining>0.001;pass++){{const open=gaps.map((value,i)=>Math.max(0,caps[i]-value));const openTotal=open.reduce((a,b)=>a+b,0);if(openTotal<=0.001)break;const used=Math.min(remaining,openTotal);gaps=gaps.map((value,i)=>value+used*open[i]/openTotal);remaining-=used;}}
+      if(remaining>0.001){{const weights=items.map((item,i)=>i===items.length-1?0.05:Math.sqrt(Math.max(1,item.characters))*(item.boundary==='paragraph'?1.5:item.boundary==='sentence'?1.25:1));const weightTotal=weights.reduce((a,b)=>a+b,0)||1;gaps=gaps.map((value,i)=>value+remaining*weights[i]/weightTotal);}}
+      total=speech+gaps.reduce((a,b)=>a+b,0);ready=true;
+      const equivalent={character_count}/(total/60), maxGap=Math.max(...gaps);status.textContent=`시험 기준 ${{clock(target)}} · 실제 ${{clock(total)}} · 분당 ${{equivalent.toFixed(1)}}자 · 재생 ${{speechRate.toFixed(2)}}배 · 최장 휴지 ${{maxGap.toFixed(1)}}초`;update();
     }}).catch(()=>{{status.textContent='음성 정보를 불러오지 못했습니다. 음성을 다시 생성해주세요.';}});
     toggle.addEventListener('click',()=>{{if(!ready)return;if(phase==='ended'||index>=items.length){{index=0;phase='idle';pauseProgress=0;player.dataset.index='';}}if(playing){{playing=false;if(phase==='audio')player.pause();else if(phase==='pause'){{pauseProgress+=Math.max(0,(performance.now()-pauseStarted)/1000);stopTimer();}}toggle.textContent='▶ 재생';}}else{{playing=true;if(phase==='pause')schedulePause();else playCurrent();}}}});
     reset.addEventListener('click',()=>{{stopTimer();playing=false;player.pause();player.currentTime=0;player.dataset.index='';index=0;phase='idle';pauseProgress=0;toggle.textContent='▶ 재생';update();}});
@@ -1145,12 +1150,12 @@ def render_paced_tts_player(audio_segments, target_seconds, language, character_
 
 
 def tts_page():
-    hero("TTS", "졸업시험 속도를 기준으로 실제 음성 길이를 측정하고, 의미 구절마다 가변 휴지를 배분합니다.")
+    hero("TTS", "졸업시험 속도를 지키면서 한 번의 휴지가 과도하게 길어지지 않도록 발화와 휴지를 함께 조절합니다.")
     if not openai_api_key():
         st.warning("음성을 생성하려면 Streamlit Secrets에 OPENAI_API_KEY를 등록해야 합니다.")
     language = st.segmented_control("언어", ["한국어", "일본어"], default="한국어", key="tts_language")
     target_label = "6분당 1,100~1,200자 · 기준 1,150자" if language == "한국어" else "6분당 900~1,000자 · 기준 950자"
-    st.caption(f"졸업시험 속도 · {target_label} · 발화는 1.0배속이며 전체 시간은 가변 휴지로 맞춥니다.")
+    st.caption(f"졸업시험 속도 · {target_label} · 원음은 1.0배속으로 만들고, 재생 단계에서 발화 속도와 짧은 가변 휴지를 함께 조절합니다.")
     st.markdown("#### 기사에서 본문 불러오기")
     url_col, load_col = st.columns([5, 1])
     article_url = url_col.text_input(
