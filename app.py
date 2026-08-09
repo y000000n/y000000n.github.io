@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import base64
 from datetime import date, datetime, timedelta
-from html import unescape
+from html import escape, unescape
 from html.parser import HTMLParser
 import ipaddress
 import json
@@ -26,7 +26,7 @@ st.set_page_config(page_title="통역 졸업시험 플래너", page_icon="🎧",
 db.init_db()
 _component_dir = Path(__file__).with_name("script_highlighter_v11")
 script_highlighter_component = (
-    components.declare_component("script_highlighter_native_v18", path=str(_component_dir))
+    components.declare_component("script_highlighter_native_v19", path=str(_component_dir))
     if _component_dir.is_dir() else None
 )
 _material_editor_dir = Path(__file__).with_name("study_material_editor")
@@ -44,12 +44,15 @@ st.markdown("""
   .hero p { margin:0; opacity:.85; }
   .card { background:white; border:1px solid #e8eaee; border-radius:14px; padding:20px; }
   .muted { color:#667085; font-size:.92rem; }
+  .dday-panel { background:linear-gradient(120deg,#263b73,#4069b1);color:white;border-radius:18px;padding:25px 28px;margin-bottom:20px;text-align:center; }
+  .dday-number { font-size:clamp(3.2rem,8vw,6.4rem);font-weight:900;line-height:1;letter-spacing:-.06em; }
   [data-testid="stSidebar"] div[role="radiogroup"] { gap:7px; }
   [data-testid="stSidebar"] div[role="radiogroup"] label { padding:10px 12px; border-radius:10px; transition:.15s; }
   [data-testid="stSidebar"] div[role="radiogroup"] label:hover { background:#e9eef8; }
   [data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) { background:#315a9c; color:white; }
   [data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) p { color:white; font-weight:700; }
-  [data-testid="stSidebar"] div[role="radiogroup"] label > div:first-child { display:none; }
+  [data-testid="stSidebar"] [data-baseweb="radio"] > div:first-of-type { display:none !important; }
+  [data-testid="stSidebar"] [data-baseweb="radio"] > input[type="radio"] { position:absolute !important; opacity:0 !important; pointer-events:none !important; }
   [data-testid="stSidebar"] div[role="radiogroup"] label { margin-left:0; }
 </style>
 """, unsafe_allow_html=True)
@@ -133,7 +136,8 @@ def dashboard():
     settings = db.get_settings()
     exam = datetime.strptime(settings["exam_date"], "%Y-%m-%d").date()
     dday = (exam - date.today()).days
-    hero("오늘도 한 문장씩, 더 정확하게", f"졸업시험까지 D-{dday}" if dday >= 0 else f"시험일로부터 {abs(dday)}일")
+    dday_text = "D-DAY" if dday == 0 else f"D-{dday}" if dday > 0 else f"D+{abs(dday)}"
+    st.markdown(f'<div class="dday-panel"><div class="dday-number">{dday_text}</div></div>', unsafe_allow_html=True)
     today = date.today().isoformat()
     week = db.week_start()
     week_practices = db.practices_between(week)
@@ -141,11 +145,10 @@ def dashboard():
     pair_count = sum(1 for r in db.all_pairs() if str(r["created_at"])[:10] >= week)
     total_goal = int(settings["weekly_ko_ja_goal"]) + int(settings["weekly_ja_ko_goal"])
     total_mins = sum(mins.values())
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("시험 D-day", f"D-{dday}" if dday >= 0 else "종료")
-    c2.metric("이번 주 연습", f"{total_mins}분", f"목표 {total_goal}분")
-    c3.metric("연습 목표 진행률", f"{min(100, total_mins / total_goal * 100) if total_goal else 0:.0f}%")
-    c4.metric("이번 주 신규 언어쌍", f"{pair_count}개", f"목표 {settings['weekly_pairs_goal']}개")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("이번 주 연습", f"{total_mins}분", f"목표 {total_goal}분")
+    c2.metric("연습 목표 진행률", f"{min(100, total_mins / total_goal * 100) if total_goal else 0:.0f}%")
+    c3.metric("이번 주 신규 언어쌍", f"{pair_count}개", f"목표 {settings['weekly_pairs_goal']}개")
     st.subheader("오늘의 기본 루틴")
     routines = [
         ("simultaneous", "KO→JA", "KO→JA 동시통역"),
@@ -311,22 +314,34 @@ def language_pairs():
 
 
 def review():
-    hero("리뷰", "잘 떠오르지 않는 표현이 먼저 나오는 플래시카드입니다.")
+    hero("리뷰", "한국어와 일본어 양방향에서 무작위로 출제되는 플래시카드입니다.")
     queue = db.review_queue()
     if not queue: st.info("먼저 Language Pairs에서 언어쌍을 추가해주세요."); return
-    if "review_pos" not in st.session_state: st.session_state.review_pos = 0
-    if "revealed" not in st.session_state: st.session_state.revealed = False
-    idx = st.session_state.review_pos % len(queue); card = queue[idx]
-    st.caption(f"카드 {idx+1} / {len(queue)} · 복습 {card['review_count']}회")
-    st.markdown(f'<div class="card" style="text-align:center;padding:44px"><div class="muted">한국어</div><h2>{card["korean"]}</h2></div>', unsafe_allow_html=True)
+    queue_by_id = {card["id"]: card for card in queue}
+    st.session_state.setdefault("revealed", False)
+    st.session_state.setdefault("review_direction", random.choice(["KO→JA", "JA→KO"]))
+    if st.session_state.get("review_card_id") not in queue_by_id:
+        st.session_state["review_card_id"] = random.choice(queue)["id"]
+        st.session_state["review_direction"] = random.choice(["KO→JA", "JA→KO"])
+        st.session_state["revealed"] = False
+    card = queue_by_id[st.session_state["review_card_id"]]
+    direction = st.session_state.get("review_direction", "KO→JA")
+    prompt_label, answer_label = ("한국어", "일본어") if direction == "KO→JA" else ("일본어", "한국어")
+    prompt_text, answer_text = (card["korean"], card["japanese"]) if direction == "KO→JA" else (card["japanese"], card["korean"])
+    st.caption(f"{direction} 무작위 문제 · 복습 {card['review_count']}회")
+    st.markdown(f'<div class="card" style="text-align:center;padding:44px"><div class="muted">{prompt_label}</div><h2>{escape(prompt_text)}</h2></div>', unsafe_allow_html=True)
     if not st.session_state.revealed:
-        if st.button("일본어 정답 보기", type="primary", use_container_width=True): st.session_state.revealed=True; st.rerun()
+        if st.button(f"{answer_label} 정답 보기", type="primary", use_container_width=True): st.session_state.revealed=True; st.rerun()
     else:
-        st.markdown(f'<div class="card" style="text-align:center;margin-top:12px"><div class="muted">일본어</div><h2>{card["japanese"]}</h2><p>{card["notes"]}</p></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="card" style="text-align:center;margin-top:12px"><div class="muted">{answer_label}</div><h2>{escape(answer_text)}</h2><p>{escape(card["notes"] or "")}</p></div>', unsafe_allow_html=True)
         cols = st.columns(3)
         for col, label, rating in zip(cols, ["못 떠올림", "조금 고민", "바로 나옴"], [0,1,2]):
             if col.button(label, use_container_width=True, type="primary" if rating==2 else "secondary"):
-                db.record_review(card["id"], rating); st.session_state.review_pos += 1; st.session_state.revealed=False; st.rerun()
+                db.record_review(card["id"], rating)
+                candidates = [item for item in queue if item["id"] != card["id"]] or queue
+                st.session_state["review_card_id"] = random.choice(candidates)["id"]
+                st.session_state["review_direction"] = random.choice(["KO→JA", "JA→KO"])
+                st.session_state.revealed=False; st.rerun()
 
 
 def study_notes():
@@ -417,13 +432,101 @@ def analyze_scripts_ai(source, interpreted, direction, interpretation_type):
                 "meaning_errors":{"type":"array","items":{"type":"string"}},
                 "expression_feedback":{"type":"array","items":{"type":"string"}},
                 "fluency_feedback":{"type":"array","items":{"type":"string"}},
+                "source_omission_spans":{"type":"array","items":{"type":"string"}},
+                "interpreted_expression_spans":{"type":"array","items":{"type":"string"}},
+                "interpreted_mistranslation_spans":{"type":"array","items":{"type":"string"}},
+                "interpreted_performance_spans":{"type":"array","items":{"type":"string"}},
                 "better_interpretation":{"type":"string"}
-            },"required":["number","source","interpreted","status","accuracy_score","omissions","meaning_errors","expression_feedback","fluency_feedback","better_interpretation"]}}
+            },"required":["number","source","interpreted","status","accuracy_score","omissions","meaning_errors","expression_feedback","fluency_feedback","source_omission_spans","interpreted_expression_spans","interpreted_mistranslation_spans","interpreted_performance_spans","better_interpretation"]}}
         }, "required":["overall_score","summary","strengths","priorities","sentences"]
     }
-    instructions = """당신은 한국어-일본어 통역대학원 교수다. 원문과 학습자의 실제 통역문을 의미 단위별로 정렬하여 한 문장씩 엄격하게 평가한다. 문장 수가 다르면 1:N 또는 N:1 대응도 허용하되 같은 내용을 중복 평가하지 않는다. 핵심 주장, 주체, 대상, 부정, 시제, 인과·대조·조건, 수치, 고유명사의 누락·추가·왜곡을 구체적으로 적는다. 단순 직역 차이는 오역으로 보지 않는다. 통역문의 음, 어, えー, あの, 반복, 자기수정, 문장 미완결, 장시간 멈춤을 암시하는 표기를 fluency_feedback에 반드시 기록한다. 표현이 어색하거나 문맥에 맞지 않으면 자연스럽고 즉시 말할 수 있는 개선안을 제시한다. 근거 없는 오류를 만들지 말고, 문제가 없으면 해당 배열을 비운다. 모든 피드백은 한국어로 쓴다."""
+    instructions = """당신은 한국어-일본어 통역대학원 교수다. 원문과 학습자의 실제 통역문을 의미 단위별로 정렬하여 한 문장씩 엄격하게 평가한다. 문장 수가 다르면 1:N 또는 N:1 대응도 허용하되 같은 내용을 중복 평가하지 않는다. 핵심 주장, 주체, 대상, 부정, 시제, 인과·대조·조건, 수치, 고유명사의 누락·추가·왜곡을 구체적으로 적는다. 단순 직역 차이는 오역으로 보지 않는다. 통역문의 음, 어, えー, あの, 반복, 자기수정, 문장 미완결, 장시간 멈춤을 암시하는 표기를 fluency_feedback에 반드시 기록한다. 표현이 어색하거나 문맥에 맞지 않으면 자연스럽고 즉시 말할 수 있는 개선안을 제시한다. 근거 없는 오류를 만들지 말고, 문제가 없으면 해당 배열을 비운다. 모든 피드백은 한국어로 쓴다.
+
+하이라이트용 배열에는 설명을 쓰지 말고 해당 문장 필드에 실제로 존재하는 연속된 원문 문자열을 글자 하나도 바꾸지 말고 복사한다.
+- source_omission_spans: 통역에서 빠진 의미를 담고 있는 source의 정확한 구간
+- interpreted_expression_spans: 어색하거나 개선이 필요한 interpreted의 정확한 구간
+- interpreted_mistranslation_spans: 오역·의미 왜곡·잘못된 추가가 발생한 interpreted의 정확한 구간
+- interpreted_performance_spans: 머뭇거림·끊김·반복·자기수정·미완결이 나타난 interpreted의 정확한 구간
+같은 문제를 여러 범주에 중복 배정하지 않는다. 문제가 없으면 빈 배열을 반환한다."""
     user_text = f"통역 유형: {interpretation_type}\n방향: {direction}\n\n[원문]\n{source}\n\n[실제 통역문]\n{interpreted}"
     return call_openai_structured(instructions, user_text, schema, "interpretation_feedback", "medium")
+
+
+FEEDBACK_HIGHLIGHT_TYPES = {
+    "expression": {"label": "어색한 표현·개선 필요", "color": "#fff0a8", "field": "interpreted_expression_spans"},
+    "mistranslation": {"label": "오역", "color": "#bfe8ff", "field": "interpreted_mistranslation_spans"},
+    "performance": {"label": "통역 퍼포먼스", "color": "#e4d3ff", "field": "interpreted_performance_spans"},
+    "omission": {"label": "누락", "color": "#ffd2df", "field": "source_omission_spans"},
+}
+
+
+def _highlight_feedback_text(text, categories):
+    """Safely highlight exact AI-returned substrings without altering the script."""
+    raw = str(text or "")
+    intervals = []
+    priorities = {"mistranslation": 0, "performance": 1, "expression": 2, "omission": 3}
+    for category, spans in categories.items():
+        for span in spans or []:
+            needle = str(span or "")
+            if not needle.strip():
+                continue
+            start = 0
+            while True:
+                index = raw.find(needle, start)
+                if index < 0:
+                    break
+                intervals.append((index, index + len(needle), priorities.get(category, 9), category))
+                start = index + max(1, len(needle))
+    accepted = []
+    for start, end, priority, category in sorted(intervals, key=lambda x: (x[0], x[2], -(x[1] - x[0]))):
+        if any(start < saved_end and end > saved_start for saved_start, saved_end, _, _ in accepted):
+            continue
+        accepted.append((start, end, priority, category))
+    accepted.sort(key=lambda x: x[0])
+    parts, cursor = [], 0
+    for start, end, _, category in accepted:
+        parts.append(escape(raw[cursor:start]))
+        color = FEEDBACK_HIGHLIGHT_TYPES[category]["color"]
+        label = FEEDBACK_HIGHLIGHT_TYPES[category]["label"]
+        parts.append(f'<mark title="{escape(label)}" style="background:{color};color:inherit;padding:.08em .12em;border-radius:3px">{escape(raw[start:end])}</mark>')
+        cursor = end
+    parts.append(escape(raw[cursor:]))
+    return "".join(parts).replace("\n", "<br>") or "—"
+
+
+def _feedback_highlight_counts(result):
+    counts = {key: 0 for key in FEEDBACK_HIGHLIGHT_TYPES}
+    fallback_fields = {
+        "expression": "expression_feedback",
+        "mistranslation": "meaning_errors",
+        "performance": "fluency_feedback",
+        "omission": "omissions",
+    }
+    for row in result.get("sentences", []):
+        for category, config in FEEDBACK_HIGHLIGHT_TYPES.items():
+            field = config["field"]
+            values = row.get(field)
+            if values is None:
+                values = row.get(fallback_fields[category], [])
+            counts[category] += len([value for value in values or [] if str(value).strip()])
+    return counts
+
+
+def _render_feedback_statistics(result):
+    counts = _feedback_highlight_counts(result)
+    maximum = max(max(counts.values()), 1)
+    rows = []
+    for category, config in FEEDBACK_HIGHLIGHT_TYPES.items():
+        count = counts[category]
+        width = count / maximum * 100
+        rows.append(
+            f'<div style="display:grid;grid-template-columns:minmax(110px,1.6fr) 4fr 42px;gap:10px;align-items:center;margin:9px 0">'
+            f'<div><span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:{config["color"]};margin-right:7px"></span>{config["label"]}</div>'
+            f'<div style="height:16px;background:#eef1f5;border-radius:999px;overflow:hidden"><div style="height:100%;width:{width:.2f}%;background:{config["color"]};border-radius:999px"></div></div>'
+            f'<strong style="text-align:right">{count}회</strong></div>'
+        )
+    st.markdown("#### 하이라이트 통계")
+    st.markdown(f'<div class="card">{"".join(rows)}</div>', unsafe_allow_html=True)
 
 
 def show_script_analysis(result):
@@ -439,15 +542,27 @@ def show_script_analysis(result):
     with b:
         st.markdown("**우선 개선할 점**")
         for x in result.get("priorities", []): st.write(f"• {x}")
+    _render_feedback_statistics(result)
+    legend = "　".join(
+        f'<span style="background:{config["color"]};padding:3px 7px;border-radius:5px">{config["label"]}</span>'
+        for config in FEEDBACK_HIGHLIGHT_TYPES.values()
+    )
     st.markdown("#### 문장별 비교")
+    st.markdown(legend, unsafe_allow_html=True)
     for row in result.get("sentences", []):
         with st.container(border=True):
             h1, h2 = st.columns([1,4])
             h1.markdown(f"**#{row['number']} · {row['status']}**")
             h2.progress(row["accuracy_score"] / 100, text=f"정확도 {row['accuracy_score']}점")
             left, right = st.columns(2)
-            left.markdown("**원문**"); left.write(row["source"] or "—")
-            right.markdown("**실제 통역**"); right.write(row["interpreted"] or "—")
+            source_html = _highlight_feedback_text(row.get("source", ""), {"omission": row.get("source_omission_spans", [])})
+            interpreted_html = _highlight_feedback_text(row.get("interpreted", ""), {
+                "expression": row.get("interpreted_expression_spans", []),
+                "mistranslation": row.get("interpreted_mistranslation_spans", []),
+                "performance": row.get("interpreted_performance_spans", []),
+            })
+            left.markdown("**원문**"); left.markdown(f'<div class="card" style="min-height:92px;line-height:1.8">{source_html}</div>', unsafe_allow_html=True)
+            right.markdown("**실제 통역**"); right.markdown(f'<div class="card" style="min-height:92px;line-height:1.8">{interpreted_html}</div>', unsafe_allow_html=True)
             details = []
             for label, field in [("누락","omissions"),("의미 오류","meaning_errors"),("표현","expression_feedback"),("유창성","fluency_feedback")]:
                 if row.get(field): details.append(f"**{label}:** " + " / ".join(row[field]))
@@ -791,7 +906,27 @@ def tts_target_duration(text, language):
     return character_count, character_count / characters_per_minute * 60 if character_count else 0
 
 
-def generate_tts_audio(text):
+def convert_tts_style(text, language):
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {"converted_text": {"type": "string"}},
+        "required": ["converted_text"],
+    }
+    if language == "한국어":
+        style = "기사문·문어체의 종결형(~다, ~이다, ~한다, ~했다, ~됐다, ~있다 등)을 자연스러운 격식체 낭독형(-ㅂ니다/-습니다/-입니다)으로 바꾼다."
+    else:
+        style = "記事文の常体（〜だ、〜である、〜する、〜した等）を自然な敬体（です・ます調）に変え、活用も文法的に整える。"
+    instructions = f"""당신은 뉴스 원고 낭독 편집자다. 입력문의 언어는 {language}다. {style}
+원문의 의미, 정보량, 문장 순서, 문단, 인명, 고유명사, 숫자, 단위, 인용 내용은 절대 바꾸지 않는다. 요약·번역·해설·정보 추가·삭제를 하지 않는다. 이미 요청한 문체인 문장은 그대로 둔다. 듣기 편하도록 문장부호와 호흡만 최소한으로 정돈한다. 결과에는 변환된 본문만 넣는다."""
+    result = call_openai_structured(instructions, str(text), schema, "tts_style_conversion", "low")
+    converted = str(result.get("converted_text", "")).strip()
+    if not converted:
+        raise RuntimeError("읽기용 문체 변환 결과가 비어 있습니다.")
+    return converted
+
+
+def generate_tts_audio(text, language):
     api_key = openai_api_key()
     if not api_key:
         raise ValueError("Streamlit Secrets에 OPENAI_API_KEY가 없습니다.")
@@ -800,7 +935,9 @@ def generate_tts_audio(text):
         "input": text,
         "voice": "alloy",
         "response_format": "mp3",
-        "speed": 0.75,
+        # Generate the slower pacing in the voice model itself. The browser only
+        # makes a small final correction so speech is not unnaturally stretched.
+        "speed": 0.70 if language == "한국어" else 0.65,
     }
     request = Request(
         "https://api.openai.com/v1/audio/speech",
@@ -838,17 +975,17 @@ def render_paced_tts_player(audio_bytes, target_seconds, language, character_cou
     button.secondary{{background:#eef2f8;color:#315a9c}}input[type=range]{{flex:1;accent-color:#315a9c}}
     .time{{font-variant-numeric:tabular-nums;font-size:13px;min-width:92px;text-align:right}}.status{{margin-top:11px;font-size:13px;color:#475467}}
     </style></head><body><div class="player">
-    <div class="meta">{language} · 공백 제외 {character_count:,}자 · 목표 {_format_duration(target_seconds)}</div>
+    <div class="meta">{language} · 공백 제외 {character_count:,}자 · 기준 속도 {_format_duration(target_seconds)}</div>
     <audio id="audio" preload="metadata" src="data:audio/mpeg;base64,{encoded}"></audio>
     <div class="controls"><button id="toggle">▶ 재생</button><button id="reset" class="secondary">처음으로</button><input id="seek" type="range" min="0" max="1000" value="0"><span id="time" class="time">0:00 / --:--</span></div>
-    <div id="status" class="status">음성 길이를 확인하고 목표 속도로 맞추는 중입니다…</div>
+    <div id="status" class="status">음성 길이를 확인하고 자연스러운 범위에서 속도를 맞추는 중입니다…</div>
     </div><script>
     const audio=document.getElementById('audio'), toggle=document.getElementById('toggle'), reset=document.getElementById('reset');
     const seek=document.getElementById('seek'), time=document.getElementById('time'), status=document.getElementById('status');
     const target={float(target_seconds):.4f}; let rate=1;
     const clock=(s)=>{{s=Math.max(0,Math.round(s||0));return `${{Math.floor(s/60)}}:${{String(s%60).padStart(2,'0')}}`;}};
     const update=()=>{{const total=audio.duration&&isFinite(audio.duration)?audio.duration/rate:target;const current=(audio.currentTime||0)/rate;time.textContent=`${{clock(current)}} / ${{clock(total)}}`;seek.value=audio.duration?Math.round(audio.currentTime/audio.duration*1000):0;}};
-    audio.addEventListener('loadedmetadata',()=>{{const proposed=audio.duration/target;rate=Math.min(4,Math.max(.25,proposed));audio.defaultPlaybackRate=rate;audio.playbackRate=rate;audio.preservesPitch=true;audio.webkitPreservesPitch=true;const exact=Math.abs(rate-proposed)<.001;status.textContent=`목표 재생시간 ${{clock(target)}} · 자동 보정 ${{rate.toFixed(2)}}배속${{exact?'':' · 브라우저 지원 범위 내에서 조정'}}`;update();}});
+    audio.addEventListener('loadedmetadata',()=>{{const proposed=target>0?audio.duration/target:1;rate=Math.min(1.10,Math.max(.90,proposed));audio.defaultPlaybackRate=rate;audio.playbackRate=rate;audio.preservesPitch=true;audio.webkitPreservesPitch=true;const actual=audio.duration/rate;const limited=Math.abs(rate-proposed)>.001;status.textContent=`예상 재생시간 ${{clock(actual)}} · 자연스러운 미세 보정 ${{rate.toFixed(2)}}배속${{limited?' · 음질 보호를 위해 과도한 늘이기는 적용하지 않음':''}}`;update();}});
     audio.addEventListener('timeupdate',update);audio.addEventListener('play',()=>toggle.textContent='❚❚ 일시정지');
     audio.addEventListener('pause',()=>toggle.textContent='▶ 재생');audio.addEventListener('ended',()=>{{toggle.textContent='▶ 다시 재생';update();}});
     toggle.addEventListener('click',()=>{{audio.playbackRate=rate;if(audio.ended)audio.currentTime=0;audio.paused?audio.play():audio.pause();}});
@@ -858,18 +995,18 @@ def render_paced_tts_player(audio_bytes, target_seconds, language, character_cou
 
 
 def tts_page():
-    hero("TTS", "한국어와 일본어 스크립트를 통역 연습용 목표 속도로 들어보세요.")
+    hero("TTS", "기사 문체를 자연스러운 정중체로 바꾸고, 통역 연습용 속도로 들어보세요.")
     if not openai_api_key():
         st.warning("음성을 생성하려면 Streamlit Secrets에 OPENAI_API_KEY를 등록해야 합니다.")
     language = st.segmented_control("언어", ["한국어", "일본어"], default="한국어", key="tts_language")
     target_label = "1,200자당 6분 · 분당 200자" if language == "한국어" else "1,000자당 6분 · 분당 약 167자"
-    st.caption(f"목표 속도 · {target_label} · 글자 수는 공백을 제외하고 계산합니다.")
+    st.caption(f"기준 속도 · {target_label} · 글자 수는 공백을 제외하고 계산합니다.")
     text = st.text_area("읽을 텍스트", height=320, placeholder="한국어 또는 일본어 스크립트를 입력하세요.", key="tts_text")
     character_count, target_seconds = tts_target_duration(text, language)
     a, b = st.columns(2)
     a.metric("공백 제외 글자 수", f"{character_count:,}자")
-    b.metric("목표 재생시간", _format_duration(target_seconds))
-    st.caption("한 번에 최대 4,000자까지 생성할 수 있습니다. 이 음성은 AI가 생성합니다.")
+    b.metric("기준 재생시간", _format_duration(target_seconds))
+    st.caption("음성 생성 전에 한국어 기사체는 -ㅂ니다/-습니다체로, 일본어 だ・である체는 です・ます調로 자동 변환합니다. 한 번에 최대 4,000자까지 생성할 수 있습니다.")
     if st.button("음성 생성", type="primary", use_container_width=True, key="tts_generate"):
         clean_text = text.strip()
         if not clean_text or character_count == 0:
@@ -878,12 +1015,17 @@ def tts_page():
             st.error("텍스트가 4,000자를 초과합니다. 여러 부분으로 나누어 생성해주세요.")
         else:
             try:
-                with st.spinner("음성을 생성하고 목표 속도를 계산하고 있습니다…"):
-                    audio = generate_tts_audio(clean_text)
+                with st.spinner("문체를 정돈한 뒤 자연스러운 속도의 음성을 생성하고 있습니다…"):
+                    converted_text = convert_tts_style(clean_text, language)
+                    if len(converted_text) > 4_000:
+                        raise ValueError("문체 변환 후 텍스트가 4,000자를 초과했습니다. 원문을 여러 부분으로 나누어 생성해주세요.")
+                    converted_count, converted_target = tts_target_duration(converted_text, language)
+                    audio = generate_tts_audio(converted_text, language)
                 st.session_state["tts_audio"] = audio
                 st.session_state["tts_signature"] = (language, clean_text)
-                st.session_state["tts_target_seconds"] = target_seconds
-                st.session_state["tts_character_count"] = character_count
+                st.session_state["tts_target_seconds"] = converted_target
+                st.session_state["tts_character_count"] = converted_count
+                st.session_state["tts_converted_text"] = converted_text
                 st.success("음성을 생성했습니다.")
             except Exception as exc:
                 st.error(str(exc))
@@ -891,6 +1033,8 @@ def tts_page():
     if audio and st.session_state.get("tts_signature") == (language, text.strip()):
         st.subheader("재생")
         render_paced_tts_player(audio, st.session_state["tts_target_seconds"], language, st.session_state["tts_character_count"])
+        with st.expander("읽기용으로 변환된 문체 확인"):
+            st.write(st.session_state.get("tts_converted_text", text.strip()))
     elif audio:
         st.info("언어나 텍스트가 변경되었습니다. 새 내용으로 음성을 다시 생성해주세요.")
 
@@ -951,8 +1095,22 @@ def script_review():
     selected_id = st.selectbox("복습할 스크립트", [r["id"] for r in scripts], format_func=lambda i: next(r["title"] for r in scripts if r["id"]==i))
     item = next(r for r in scripts if r["id"] == selected_id)
     highlights = script_highlighter_component(text=item["script_text"], highlights=item.get("highlights") or "[]", key=f"highlighter_{selected_id}", default=item.get("highlights") or "[]")
+    try:
+        parsed_highlights = json.loads(highlights) if isinstance(highlights, str) else highlights
+        if not isinstance(parsed_highlights, list): parsed_highlights = []
+    except (json.JSONDecodeError, TypeError):
+        parsed_highlights = []
+    serialized_highlights = json.dumps(parsed_highlights, ensure_ascii=False, separators=(",", ":"))
+    try:
+        saved_highlights = json.dumps(json.loads(item.get("highlights") or "[]"), ensure_ascii=False, separators=(",", ":"))
+    except (json.JSONDecodeError, TypeError):
+        saved_highlights = "[]"
+    if serialized_highlights != saved_highlights:
+        db.update_record("script_reviews", selected_id, {"highlights": serialized_highlights})
+        st.toast("하이라이트와 메모를 자동 저장했습니다.")
+        st.rerun()
     if st.button("하이라이트와 메모 저장", type="primary", use_container_width=True):
-        db.update_record("script_reviews", selected_id, {"highlights": highlights or "[]"})
+        db.update_record("script_reviews", selected_id, {"highlights": serialized_highlights})
         st.success("복습 내용을 저장했습니다."); st.rerun()
     edit_button("script_reviews", item, [("title","제목"),("script_text","스크립트")], "스크립트 원문을 수정합니다. 원문 위치가 바뀌면 기존 하이라이트 위치도 달라질 수 있습니다.", f"script_{selected_id}")
 
@@ -983,14 +1141,16 @@ def study_materials():
         mode_filter = st.session_state.get("material_mode_filter", "전체")
         filtered = [m for m in materials if (not keyword or keyword.lower() in m["title"].lower() or keyword.lower() in str(m.get("content_html", "")).lower()) and (direction_filter == "전체" or m.get("language_direction", "한일") == direction_filter) and (mode_filter == "전체" or m.get("interpretation_mode", "동시") == mode_filter)]
         if filtered:
-            header = st.columns([1,6,2,2,2])
-            for col, label in zip(header, ["번호","제목","언어 방향","통역 방식","작성일"]): col.caption(label)
+            header = st.columns([1,6,2,2,2,1])
+            for col, label in zip(header, ["번호","제목","언어 방향","통역 방식","작성일","수정"]): col.caption(label)
             for material in filtered:
-                cols = st.columns([1,6,2,2,2])
+                cols = st.columns([1,6,2,2,2,1])
                 cols[0].write(material["id"])
                 if cols[1].button(material["title"], key=f"material_open_{material['id']}", type="tertiary"):
                     st.session_state["material_selected_id"] = material["id"]; st.session_state["material_page"] = "view"; st.rerun()
                 cols[2].write(material.get("language_direction", "한일")); cols[3].write(material.get("interpretation_mode", "동시")); cols[4].write(str(material.get("created_at", ""))[:10])
+                if cols[5].button("수정", key=f"material_list_edit_{material['id']}", use_container_width=True):
+                    st.session_state["material_selected_id"] = material["id"]; st.session_state["material_page"] = "edit"; st.rerun()
         else: st.info("조건에 맞는 게시글이 없습니다.")
         st.divider()
         bottom = st.columns([3,1.2,1.2,2,1])
