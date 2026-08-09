@@ -918,7 +918,7 @@ def convert_tts_style(text, language):
     else:
         style = "記事文の常体（〜だ、〜である、〜する、〜した等）を自然な敬体（です・ます調）に変え、活用も文法的に整える。"
     instructions = f"""당신은 뉴스 원고 낭독 편집자다. 입력문의 언어는 {language}다. {style}
-원문의 의미, 정보량, 문장 순서, 문단, 인명, 고유명사, 숫자, 단위, 인용 내용은 절대 바꾸지 않는다. 요약·번역·해설·정보 추가·삭제를 하지 않는다. 이미 요청한 문체인 문장은 그대로 둔다. 듣기 편하도록 문장부호와 호흡만 최소한으로 정돈한다. 결과에는 변환된 본문만 넣는다."""
+원문의 의미, 정보량, 문장 순서, 문단, 인명, 고유명사, 숫자, 단위, 인용 내용은 절대 바꾸지 않는다. 요약·번역·해설·정보 추가·삭제를 하지 않는다. 이미 요청한 문체인 문장은 그대로 둔다. 낭독할 때 의미 단위가 자연스럽게 구분되도록 구절 경계에는 쉼표(한국어 , / 일본어 、)를 최소한으로 보완하고, 문장 끝 문장부호는 명확히 유지한다. 말줄임표를 새로 만들거나 불필요하게 문장을 쪼개지 않는다. 결과에는 변환된 본문만 넣는다."""
     result = call_openai_structured(instructions, str(text), schema, "tts_style_conversion", "low")
     converted = str(result.get("converted_text", "")).strip()
     if not converted:
@@ -930,14 +930,22 @@ def generate_tts_audio(text, language):
     api_key = openai_api_key()
     if not api_key:
         raise ValueError("Streamlit Secrets에 OPENAI_API_KEY가 없습니다.")
+    pause_instructions = (
+        "한국어 뉴스 앵커처럼 또렷하고 자연스럽게 읽으세요. 발화 자체는 정상 1.0 속도로 유지하고 음절을 느리게 늘이지 마세요. "
+        "쉼표와 자연스러운 의미 구절 경계에서는 약 0.5초 짧게 쉬고, 마침표·물음표·느낌표와 문단 끝에서는 약 1.0초로 더 길게 쉬세요. "
+        "숫자와 고유명사를 정확히 발음하고, 전체적으로 차분한 통역 연습용 낭독을 하세요."
+        if language == "한국어" else
+        "日本語のニュースアナウンサーのように、明瞭で自然に読んでください。発話そのものは通常の1.0倍速に保ち、音節を間延びさせないでください。"
+        "読点と自然な意味のまとまりでは約0.5秒短く休み、句点・疑問符・感嘆符と段落末では約1.0秒と、より長く休んでください。"
+        "数字と固有名詞を正確に発音し、落ち着いた通訳練習向けの読み方にしてください。"
+    )
     payload = {
-        "model": "tts-1",
+        "model": "gpt-4o-mini-tts",
         "input": text,
-        "voice": "alloy",
+        "voice": "marin",
         "response_format": "mp3",
-        # Generate the slower pacing in the voice model itself. The browser only
-        # makes a small final correction so speech is not unnaturally stretched.
-        "speed": 0.70 if language == "한국어" else 0.65,
+        "speed": 1.0,
+        "instructions": pause_instructions,
     }
     request = Request(
         "https://api.openai.com/v1/audio/speech",
@@ -975,32 +983,32 @@ def render_paced_tts_player(audio_bytes, target_seconds, language, character_cou
     button.secondary{{background:#eef2f8;color:#315a9c}}input[type=range]{{flex:1;accent-color:#315a9c}}
     .time{{font-variant-numeric:tabular-nums;font-size:13px;min-width:92px;text-align:right}}.status{{margin-top:11px;font-size:13px;color:#475467}}
     </style></head><body><div class="player">
-    <div class="meta">{language} · 공백 제외 {character_count:,}자 · 기준 속도 {_format_duration(target_seconds)}</div>
+    <div class="meta">{language} · 공백 제외 {character_count:,}자 · 1.0배속 발화 + 구절·문장 휴지</div>
     <audio id="audio" preload="metadata" src="data:audio/mpeg;base64,{encoded}"></audio>
     <div class="controls"><button id="toggle">▶ 재생</button><button id="reset" class="secondary">처음으로</button><input id="seek" type="range" min="0" max="1000" value="0"><span id="time" class="time">0:00 / --:--</span></div>
-    <div id="status" class="status">음성 길이를 확인하고 자연스러운 범위에서 속도를 맞추는 중입니다…</div>
+    <div id="status" class="status">음성 길이를 확인하는 중입니다…</div>
     </div><script>
     const audio=document.getElementById('audio'), toggle=document.getElementById('toggle'), reset=document.getElementById('reset');
     const seek=document.getElementById('seek'), time=document.getElementById('time'), status=document.getElementById('status');
-    const target={float(target_seconds):.4f}; let rate=1;
+    const target={float(target_seconds):.4f}; const rate=1;
     const clock=(s)=>{{s=Math.max(0,Math.round(s||0));return `${{Math.floor(s/60)}}:${{String(s%60).padStart(2,'0')}}`;}};
     const update=()=>{{const total=audio.duration&&isFinite(audio.duration)?audio.duration/rate:target;const current=(audio.currentTime||0)/rate;time.textContent=`${{clock(current)}} / ${{clock(total)}}`;seek.value=audio.duration?Math.round(audio.currentTime/audio.duration*1000):0;}};
-    audio.addEventListener('loadedmetadata',()=>{{const proposed=target>0?audio.duration/target:1;rate=Math.min(1.10,Math.max(.90,proposed));audio.defaultPlaybackRate=rate;audio.playbackRate=rate;audio.preservesPitch=true;audio.webkitPreservesPitch=true;const actual=audio.duration/rate;const limited=Math.abs(rate-proposed)>.001;status.textContent=`예상 재생시간 ${{clock(actual)}} · 자연스러운 미세 보정 ${{rate.toFixed(2)}}배속${{limited?' · 음질 보호를 위해 과도한 늘이기는 적용하지 않음':''}}`;update();}});
+    audio.addEventListener('loadedmetadata',()=>{{audio.defaultPlaybackRate=1;audio.playbackRate=1;audio.preservesPitch=true;audio.webkitPreservesPitch=true;status.textContent=`재생시간 ${{clock(audio.duration)}} · 발화 1.0배속 · 구절 약 0.5초 / 문장 약 1.0초 휴지`;update();}});
     audio.addEventListener('timeupdate',update);audio.addEventListener('play',()=>toggle.textContent='❚❚ 일시정지');
     audio.addEventListener('pause',()=>toggle.textContent='▶ 재생');audio.addEventListener('ended',()=>{{toggle.textContent='▶ 다시 재생';update();}});
-    toggle.addEventListener('click',()=>{{audio.playbackRate=rate;if(audio.ended)audio.currentTime=0;audio.paused?audio.play():audio.pause();}});
+    toggle.addEventListener('click',()=>{{audio.playbackRate=1;if(audio.ended)audio.currentTime=0;audio.paused?audio.play():audio.pause();}});
     reset.addEventListener('click',()=>{{audio.pause();audio.currentTime=0;update();}});
     seek.addEventListener('input',()=>{{if(audio.duration)audio.currentTime=Number(seek.value)/1000*audio.duration;update();}});
     </script></body></html>""", height=180)
 
 
 def tts_page():
-    hero("TTS", "기사 문체를 자연스러운 정중체로 바꾸고, 통역 연습용 속도로 들어보세요.")
+    hero("TTS", "발화는 자연스러운 1.0배속으로 유지하고, 의미 구절과 문장 사이의 휴지로 통역 호흡을 만듭니다.")
     if not openai_api_key():
         st.warning("음성을 생성하려면 Streamlit Secrets에 OPENAI_API_KEY를 등록해야 합니다.")
     language = st.segmented_control("언어", ["한국어", "일본어"], default="한국어", key="tts_language")
     target_label = "1,200자당 6분 · 분당 200자" if language == "한국어" else "1,000자당 6분 · 분당 약 167자"
-    st.caption(f"기준 속도 · {target_label} · 글자 수는 공백을 제외하고 계산합니다.")
+    st.caption(f"기존 분량 기준 참고 · {target_label} · 실제 음성은 1.0배속 발화와 단계별 휴지로 생성합니다.")
     st.markdown("#### 기사에서 본문 불러오기")
     url_col, load_col = st.columns([5, 1])
     article_url = url_col.text_input(
@@ -1032,8 +1040,8 @@ def tts_page():
     character_count, target_seconds = tts_target_duration(text, language)
     a, b = st.columns(2)
     a.metric("공백 제외 글자 수", f"{character_count:,}자")
-    b.metric("기준 재생시간", _format_duration(target_seconds))
-    st.caption("불러온 본문은 직접 수정할 수 있습니다. 음성 생성 전에 한국어 기사체는 -ㅂ니다/-습니다체로, 일본어 だ・である체는 です・ます調로 자동 변환합니다. 한 번에 최대 4,000자까지 생성할 수 있습니다.")
+    b.metric("분량 기준 시간", _format_duration(target_seconds))
+    st.caption("발화 속도를 인위적으로 늦추지 않습니다. 구절 경계에서는 약 0.5초, 문장·문단 끝에서는 약 1.0초 쉬도록 생성합니다. 한국어 기사체는 -ㅂ니다/-습니다체로, 일본어 だ・である체는 です・ます調로 자동 변환합니다.")
     if st.button("음성 생성", type="primary", use_container_width=True, key="tts_generate"):
         clean_text = text.strip()
         if not clean_text or character_count == 0:
@@ -1042,7 +1050,7 @@ def tts_page():
             st.error("텍스트가 4,000자를 초과합니다. 여러 부분으로 나누어 생성해주세요.")
         else:
             try:
-                with st.spinner("문체를 정돈한 뒤 자연스러운 속도의 음성을 생성하고 있습니다…"):
+                with st.spinner("문체와 호흡 지점을 정돈한 뒤 1.0배속 음성을 생성하고 있습니다…"):
                     converted_text = convert_tts_style(clean_text, language)
                     if len(converted_text) > 4_000:
                         raise ValueError("문체 변환 후 텍스트가 4,000자를 초과했습니다. 원문을 여러 부분으로 나누어 생성해주세요.")
