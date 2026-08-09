@@ -652,30 +652,81 @@ def fetch_article_text(article_url):
     return {"title": title.strip(), "text": article_text, "url": url}
 
 
+def _normalize_extracted_term(value):
+    return re.sub(r"[\s·・.ㆍ\-_/（）()「」『』\[\]]+", "", str(value or "")).casefold()
+
+
+def refine_extracted_terms(terms):
+    """Remove deterministic exclusions and components duplicated by a combined person entry."""
+    excluded = {
+        "청와대", "青瓦台", "행정안전부", "행안부", "行政安全部", "기획재정부", "기재부", "企画財政部",
+        "산업통상부", "산업통상자원부", "산자부", "産業通商資源部", "후생성", "厚生省",
+        "518민주화운동", "518民主化運動", "국가폭력피해자", "国家暴力被害者",
+        "gdp", "gnp", "닛케이지수", "日経指数", "日経平均", "日経平均株価",
+        "행정안전부장관", "행안부장관", "行政安全部長官", "기획재정부장관", "기재부장관", "企画財政部長官",
+        "산업통상부장관", "산업통상자원부장관", "산자부장관", "産業通商資源部長官", "후생성장관", "厚生大臣",
+    }
+    excluded = {_normalize_extracted_term(value) for value in excluded}
+    explicit_leader_exclusions = (
+        ("이재명", ("대통령", "大統領")), ("李在明", ("대통령", "大統領")),
+        ("다카이치사나에", ("총리", "수상", "首相", "内閣総理大臣")),
+        ("高市早苗", ("총리", "수상", "首相", "内閣総理大臣")),
+    )
+    kept = []
+    for item in terms or []:
+        normalized = _normalize_extracted_term(item.get("term", ""))
+        if not normalized or normalized in excluded:
+            continue
+        if any(_normalize_extracted_term(name) in normalized and any(_normalize_extracted_term(title) in normalized for title in titles) for name, titles in explicit_leader_exclusions):
+            continue
+        kept.append(item)
+    combined = [
+        (_normalize_extracted_term(item.get("term", "")), item)
+        for item in kept if item.get("subtype") == "인명·소속·직책"
+    ]
+    refined = []
+    for item in kept:
+        normalized = _normalize_extracted_term(item.get("term", ""))
+        if item.get("subtype") != "인명·소속·직책" and any(normalized != whole and normalized in whole for whole, _ in combined):
+            continue
+        refined.append(item)
+    return refined
+
+
 def extract_terms_ai(text):
-    subtypes = ["인명","직책","부서명","팀명","기관·기업명","법률·협정명","정책·사업명","기술·전문개념","기타 고유명사"]
+    subtypes = ["인명·소속·직책","인명","직책","부서명","팀명","위원회·조직명","기관·기업명","법률·협정명","정책·사업명","기술·전문개념","기타 고유명사"]
     schema = {"type":"object","additionalProperties":False,"properties":{"source_language":{"type":"string","enum":["한국어","일본어","혼합"]},"terms":{"type":"array","items":{"type":"object","additionalProperties":False,"properties":{"term":{"type":"string"},"translation":{"type":"string"},"translation_language":{"type":"string","enum":["한국어","일본어"]},"category":{"type":"string","enum":["고유명사","전문용어"]},"subtype":{"type":"string","enum":subtypes},"context":{"type":"string"},"position":{"type":"integer"}},"required":["term","translation","translation_language","category","subtype","context","position"]}}},"required":["source_language","terms"]}
-    instructions = """입력 텍스트에서 한일·일한 통역 준비에 필요한 고유명사와 전문용어를 추출한다.
+    instructions = """입력 텍스트에서 한일·일한 통역 준비에 실제로 필요한 항목만 추출한다. 아래 판단 순서를 반드시 따른다.
 
-필수 추출 기준:
-- 인명은 유명도와 관계없이 반드시 모두 추출한다.
-- 직책, 회사·기관의 부서명, 팀명, 위원회명 등 고유명사도 반드시 추출한다.
-- 법률명, 협정명, 정책명, 사업명, 기술명과 '생산가능인구'처럼 뜻을 정확히 준비해야 하는 복잡한 전문 개념을 추출한다.
+1. 우선 제외:
+- 청와대, 행정안전부, 기획재정부, 산업통상자원부, 후생성 등 한국·일본 및 기타 국가의 정부부처·대통령실과 그 약칭은 추출하지 않는다.
+- 정부부처명에 '장관' 또는 '대신'이라는 직책만 붙고 사람 이름이 없으면 추출하지 않는다.
+- 한국과 일본의 대통령·총리는 사람 이름이 함께 있어도 추출하지 않는다. 현직·전직을 모두 포함한다. 예: '이재명 대통령', '다카이치 사나에 총리'는 제외한다.
+- '5·18 민주화운동', '국가폭력 피해자' 같은 기초 역사 용어·일반명사와 국가명, 수도명, GDP, GNP, 닛케이 지수, 기초 시사용어는 제외한다.
 
-제외 기준(필수 추출 기준보다 우선한다):
-- 기재부·기획재정부·산업통상부·산업통상자원부·후생성처럼 한국·일본 및 기타 국가의 중앙정부 부처명과 그 약칭은 제외한다.
-- GDP, GNP, 닛케이 지수처럼 일반적인 시사 상식으로 바로 이해되는 지표·용어는 제외한다.
-- 국가명, 수도명, 널리 알려진 국제기구 약칭, 대통령·국회·경제·금리 같은 기초 시사용어와 일반 명사는 제외한다.
+2. 이름 결합:
+- 위 제외 대상이 아닌 인명에 소속이나 직책이 함께 나오면 반드시 하나의 term으로 합친다. 인명, 소속, 직책을 별도 항목으로 중복 출력하지 않는다.
+- 원문에 나온 정보만 합치며 원문에 없는 소속이나 직책을 추정하지 않는다.
+- 예: '삼성전자 홍길동 팀장'은 그 전체를 하나의 '인명·소속·직책'으로 출력한다.
+- 예: '야마다 케이스케 한일협회 회장'은 그 전체를 하나의 '인명·소속·직책'으로 출력한다.
+- 정부부처 장관도 사람 이름이 나오면 부처명과 직책을 포함한 전체 표현을 하나로 추출한다. 예: '김민수 행정안전부 장관'은 포함한다. 단, 한국·일본 대통령·총리 제외 규칙이 항상 우선한다.
+- 이름만 나오면 '인명', 직책만 준비 가치가 있을 때는 '직책'으로 출력한다.
 
-출력 기준:
-- term에는 원문 표기를 그대로 쓰고 중복은 하나로 합친다.
+3. 반드시 포함:
+- 정부부처가 아닌 위원회, 기업, 노동조합, 협회, 단체와 기타 조직의 고유명은 반드시 추출한다. 예: '전교조'는 '위원회·조직명'으로 포함한다.
+- 회사·기관의 부서명과 팀명, 법률명, 협정명, 정책명, 사업명, 기술명, 그리고 '생산가능인구'처럼 정확한 개념 준비가 필요한 전문용어를 추출한다.
+
+4. 출력:
+- term에는 원문 표기를 유지하고 같은 대상을 중복 출력하지 않는다.
 - 한국어 원문 용어에는 자연스럽고 표준적인 일본어 번역을, 일본어 원문 용어에는 자연스러운 한국어 번역을 병기한다. 혼합 텍스트는 각 용어의 원문 언어와 반대 언어로 번역한다.
 - 영문 표기의 용어는 그 용어가 들어 있는 문장이 한국어이면 일본어로, 일본어이면 한국어로 번역한다.
 - 인명·기관명 등 정식 번역을 확정할 수 없으면 널리 쓰이는 표기 또는 음역을 쓰며, 번역을 임의로 만들어내지 않는다.
 - context에는 그 기사에서의 짧은 의미나 역할을 한국어로 적는다.
 - position에는 원문에서 처음 등장한 문자 위치에 가까운 정수를 넣는다.
 - 근거가 없는 용어는 추가하지 않는다."""
-    return call_openai_structured(instructions, text, schema, "terminology_extraction", "low")
+    result = call_openai_structured(instructions, text, schema, "terminology_extraction", "low")
+    result["terms"] = refine_extracted_terms(result.get("terms", []))
+    return result
 
 
 def terminology_extraction():
