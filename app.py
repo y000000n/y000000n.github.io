@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from html import escape, unescape
 from html.parser import HTMLParser
@@ -1024,12 +1023,44 @@ segments:
     return {"converted_text": rebuilt.strip(), "segments": segments}
 
 
-def _generate_tts_segment(text, language, api_key):
+def _continuous_tts_text(segments, language):
+    """Join semantic segments into one utterance while retaining natural breath cues."""
+    chunks = []
+    phrase_mark = "," if language == "한국어" else "、"
+    terminal_pattern = r"[,.!?;:，。！？；：、…]$"
+    for segment in segments:
+        value = str(segment.get("text", "")).strip()
+        if not value:
+            continue
+        boundary = segment.get("boundary", "phrase")
+        if boundary == "phrase" and not re.search(terminal_pattern, value):
+            value += phrase_mark
+        chunks.append(value)
+        if boundary == "paragraph":
+            chunks.append("\n\n")
+        elif boundary == "sentence":
+            chunks.append("\n")
+        else:
+            chunks.append(" ")
+    return "".join(chunks).strip()
+
+
+def _generate_tts_segment(text, language, api_key, target_seconds=None, continuous=False):
+    if target_seconds:
+        target_note = (
+            f" 전체 낭독시간은 약 {max(1, round(target_seconds))}초를 목표로 하세요."
+            if language == "한국어" else
+            f" 原稿全体の朗読時間は約{max(1, round(target_seconds))}秒を目標にしてください。"
+        )
+    else:
+        target_note = ""
     pause_instructions = (
-        "주어진 한국어 구절만 정확히 한 번 읽으세요. 다른 말은 추가하지 마세요. 한국어 뉴스 앵커처럼 또렷하고 자연스러운 정상 1.0 속도로 읽으세요. 구절의 길이나 문장 내용에 따라 갑자기 빨라지거나 느려지지 말고 처음부터 끝까지 일정한 발화 속도를 유지하세요. 짧은 구절을 서두르거나 긴 구절의 음절을 늘이지 마세요. 숫자와 고유명사를 정확히 발음하세요."
+        "주어진 한국어 원고 전체를 하나의 연속된 녹음처럼 정확히 한 번 읽으세요. 다른 말은 추가하지 마세요. 한국어 뉴스 앵커처럼 또렷하고 자연스럽게 읽되, 처음부터 끝까지 같은 발화 속도와 호흡을 유지하세요. 쉼표에서는 짧게, 문장 끝에서는 쉼표보다 조금 길게, 문단 사이에서는 문장 끝보다 조금 길게 자연스럽게 쉬세요. 특정 구절만 서두르거나 음절을 늘이지 말고, 목표시간은 음절을 인위적으로 늘이는 대신 일정한 발화와 자연스러운 휴지로 맞추세요. 숫자와 고유명사를 정확히 발음하세요."
         if language == "한국어" else
-        "与えられた日本語の一区切りだけを正確に一度読み、別の言葉を加えないでください。ニュースアナウンサーのように明瞭で自然な通常の1.0倍速で読んでください。区切りの長さや内容によって急に速くしたり遅くしたりせず、最初から最後まで一定の発話速度を保ってください。短い区切りを急いだり、長い区切りの音を間延びさせたりしないでください。数字と固有名詞を正確に発音してください。"
+        "与えられた日本語の原稿全体を、一つの連続した録音として正確に一度だけ読んでください。別の言葉を加えないでください。ニュースアナウンサーのように明瞭かつ自然に、最初から最後まで同じ発話速度と呼吸を保ってください。読点では短く、文末では読点より少し長く、段落間では文末より少し長く自然に間を取ってください。特定の区切りだけを急いだり音を引き伸ばしたりせず、目標時間には不自然な引き伸ばしではなく一定の発話と自然な間で近づけてください。数字と固有名詞を正確に発音してください。"
     )
+    if continuous:
+        pause_instructions += target_note
     payload = {
         "model": "gpt-4o-mini-tts",
         "input": text,
@@ -1059,30 +1090,26 @@ def _generate_tts_segment(text, language, api_key):
     return audio
 
 
-def generate_tts_audio(segments, language):
+def generate_tts_audio(segments, language, target_seconds):
     api_key = openai_api_key()
     if not api_key:
         raise ValueError("Streamlit Secrets에 OPENAI_API_KEY가 없습니다.")
     if not segments:
         raise ValueError("음성으로 생성할 구절이 없습니다.")
-    results = [None] * len(segments)
-    workers = min(6, len(segments))
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        pending = {
-            executor.submit(_generate_tts_segment, segment["text"], language, api_key): index
-            for index, segment in enumerate(segments)
-        }
-        for future in as_completed(pending):
-            index = pending[future]
-            try:
-                results[index] = {
-                    "audio": future.result(),
-                    "characters": len(re.sub(r"\s+", "", segments[index]["text"])),
-                    "boundary": segments[index].get("boundary", "phrase"),
-                }
-            except Exception as exc:
-                raise RuntimeError(f"{index + 1}번째 구절 음성 생성 실패: {exc}") from exc
-    return results
+    continuous_text = _continuous_tts_text(segments, language)
+    if not continuous_text:
+        raise ValueError("연속 발화로 생성할 원고가 없습니다.")
+    if len(re.sub(r"\s+", "", continuous_text)) > 1_800:
+        raise ValueError("일정한 발화 속도를 위해 한 번에 생성할 수 있는 분량은 공백 제외 약 1,800자까지입니다. 원고를 두 부분으로 나누어 생성해주세요.")
+    try:
+        audio = _generate_tts_segment(continuous_text, language, api_key, target_seconds, continuous=True)
+    except Exception as exc:
+        raise RuntimeError(f"연속 음성 생성 실패: {exc}") from exc
+    return [{
+        "audio": audio,
+        "characters": len(re.sub(r"\s+", "", continuous_text)),
+        "boundary": "continuous",
+    }]
 
 
 def _format_duration(seconds):
@@ -1109,7 +1136,7 @@ def render_paced_tts_player(audio_segments, target_seconds, language, character_
     button.secondary{{background:#eef2f8;color:#315a9c}}input[type=range]{{flex:1;accent-color:#315a9c}}
     .time{{font-variant-numeric:tabular-nums;font-size:13px;min-width:92px;text-align:right}}.status{{margin-top:11px;font-size:13px;color:#475467}}
     </style></head><body><div class="player">
-    <div class="meta">{language} · 공백 제외 {character_count:,}자 · 시험 기준 {standard} · 자연스러운 휴지 우선</div>
+    <div class="meta">{language} · 공백 제외 {character_count:,}자 · 시험 기준 {standard} · 원고 전체 연속 발화</div>
     <div class="controls"><button id="toggle">▶ 재생</button><button id="reset" class="secondary">처음으로</button><input id="seek" type="range" min="0" max="1000" value="0"><span id="time" class="time">0:00 / --:--</span></div>
     <div id="status" class="status">각 구절의 음성 길이를 측정하고 시험 기준에 맞춰 휴지를 계산하는 중입니다…</div>
     </div><script>
@@ -1130,6 +1157,7 @@ def render_paced_tts_player(audio_segments, target_seconds, language, character_
     player.addEventListener('timeupdate',update);player.addEventListener('ended',()=>{{pauseProgress=0;if(gaps[index]>0&&playing)schedulePause();else{{index+=1;if(playing)playCurrent();}}}});
     Promise.all(probes.map(audio=>new Promise((resolve,reject)=>{{if(audio.readyState>=1)resolve();else{{audio.addEventListener('loadedmetadata',resolve,{{once:true}});audio.addEventListener('error',reject,{{once:true}});}}}}))).then(()=>{{
       mediaDurations=probes.map(audio=>audio.duration);const naturalSpeech=mediaDurations.reduce((a,b)=>a+b,0);
+      if(items.length===1&&items[0].boundary==='continuous'){{const uniformRate=Math.min(4,Math.max(0.25,naturalSpeech/Math.max(0.01,target)));segmentRates=[uniformRate];durations=[naturalSpeech/uniformRate];gaps=[0];total=durations[0];ready=true;const equivalent={character_count}/(total/60);status.textContent=`시험 기준 ${{clock(target)}} · 실제 ${{clock(total)}} · 분당 ${{equivalent.toFixed(1)}}자 · 전체 동일 ${{uniformRate.toFixed(2)}}배 · 연속 발화`;update();return;}}
       const totalCharacters=items.reduce((sum,item)=>sum+Math.max(1,item.characters),0);const referenceCps=totalCharacters/Math.max(0.01,naturalSpeech);
       const normalizationRates=items.map((item,i)=>{{const rawCps=Math.max(1,item.characters)/Math.max(0.1,mediaDurations[i]);return Math.min(1.18,Math.max(0.82,referenceCps/rawCps));}});
       const normalizedSpeech=mediaDurations.reduce((sum,value,i)=>sum+value/normalizationRates[i],0);
@@ -1209,7 +1237,7 @@ def tts_page():
                     if len(converted_text) > 4_000:
                         raise ValueError("문체 변환 후 텍스트가 4,000자를 초과했습니다. 원문을 여러 부분으로 나누어 생성해주세요.")
                     converted_count, converted_target = tts_target_duration(converted_text, language)
-                    audio = generate_tts_audio(prepared["segments"], language)
+                    audio = generate_tts_audio(prepared["segments"], language, converted_target)
                 st.session_state["tts_audio"] = audio
                 st.session_state["tts_signature"] = (language, clean_text)
                 st.session_state["tts_target_seconds"] = converted_target
@@ -1217,7 +1245,7 @@ def tts_page():
                 st.session_state["tts_converted_text"] = converted_text
                 st.session_state["tts_segment_texts"] = [segment["text"] for segment in prepared["segments"]]
                 st.session_state["tts_segment_count"] = len(prepared["segments"])
-                st.success(f"{len(prepared['segments'])}개 의미 구절의 음성을 생성했습니다.")
+                st.success(f"{len(prepared['segments'])}개 의미 구절을 반영한 하나의 연속 음성을 생성했습니다.")
             except Exception as exc:
                 st.error(str(exc))
     audio = st.session_state.get("tts_audio")
