@@ -915,6 +915,20 @@ def tts_target_range(text, language):
     return character_count / fastest_cpm * 60, character_count / slowest_cpm * 60
 
 
+def _tts_segments_too_coarse(segments, language):
+    lengths = [len(re.sub(r"\s+", "", str(segment.get("text", "")))) for segment in segments]
+    lengths = [length for length in lengths if length]
+    if not lengths:
+        return True
+    maximum, average_limit = (36, 25) if language == "한국어" else (28, 19)
+    total = sum(lengths)
+    return max(lengths) > maximum or (total >= 60 and total / len(lengths) > average_limit)
+
+
+def _normalized_tts_text(value):
+    return re.sub(r"\s+", "", str(value or ""))
+
+
 def convert_tts_style(text, language):
     schema = {
         "type": "object",
@@ -940,12 +954,44 @@ def convert_tts_style(text, language):
         style = "기사문·문어체의 종결형(~다, ~이다, ~한다, ~했다, ~됐다, ~있다 등)을 자연스러운 격식체 낭독형(-ㅂ니다/-습니다/-입니다)으로 바꾼다."
     else:
         style = "記事文の常体（〜だ、〜である、〜する、〜した等）を自然な敬体（です・ます調）に変え、活用も文法的に整える。"
-    segment_rule = "한 구절은 공백 제외 대체로 25~55자로" if language == "한국어" else "一つの区切りは空白を除き、おおむね20〜50文字に"
+    segment_rule = (
+        "한 구절은 공백 제외 대체로 10~28자, 최대 36자로"
+        if language == "한국어" else
+        "一つの区切りは空白を除き、おおむね8〜22文字、原則として最大28文字に"
+    )
+    language_rules = (
+        """한국어는 다음 기준을 우선한다.
+- 주제·주어 덩어리는 조사까지 포함해 나눈다.
+- 이유·조건·대조·시간을 나타내는 연결어미 뒤에서 나눈다.
+- 긴 목적어·부사어와 뒤의 서술어가 각각 즉시 파악되도록 나눈다.
+- 조사 앞, 고유명사 내부, 용언 어간과 어미 사이에서는 절대 나누지 않는다."""
+        if language == "한국어" else
+        """日本語は次の基準を優先する。
+- 主題・主語は「は・が」などの助詞まで含めて一区切りにする。
+- 「〜が、」「〜ことで、」「〜ため、」「〜場合、」「〜一方、」など、従属節・接続節の末尾で区切る。
+- 長い目的語は「〜を」までを一区切りにし、後続する述語を別の区切りにできる。
+- 「可能性があると／期待されている」のように、内容節と最終述語を分けると理解しやすい場合は区切る。
+- 助詞の直前、固有名詞の途中、動詞と助動詞・活用語尾の間では絶対に区切らない。
+
+分割例（この粒度と文法単位を必ず参考にする）:
+入力: 地球や月への影響はほぼないと考えられているが、月面の性質を分析することで、将来の月面利用に向けた知見を得られる可能性があると期待されている。
+segments:
+1. 地球や月への影響は [phrase]
+2. ほぼないと考えられているが、 [phrase]
+3. 月面の性質を分析することで、 [phrase]
+4. 将来の月面利用に向けた知見を [phrase]
+5. 得られる可能性があると [phrase]
+6. 期待されている。 [sentence]"""
+    )
     instructions = f"""당신은 뉴스 원고 낭독 편집자다. 입력문의 언어는 {language}다. {style}
 원문의 의미, 정보량, 문장 순서, 문단, 인명, 고유명사, 숫자, 단위, 인용 내용은 절대 바꾸지 않는다. 요약·번역·해설·정보 추가·삭제를 하지 않는다. 이미 요청한 문체인 문장은 그대로 둔다. 문장부호를 자연스럽게 정돈하되 말줄임표를 새로 만들지 않는다.
 
-변환한 원고를 통역 청취용 의미 구절로 촘촘히 분할한다. {segment_rule} 하되, 주어·서술어·수식 관계와 고유명사 덩어리를 훼손하지 않는다. 각 segment의 text는 실제로 읽을 문자열이며 모든 내용이 원래 순서대로 정확히 한 번씩 포함되어야 한다. 구절 뒤가 같은 문장 안의 의미 단위 경계면 boundary=phrase, 문장 끝이면 sentence, 문단 끝이면 paragraph로 표시한다. converted_text에는 모든 segment text를 자연스러운 공백과 문단으로 이어 붙인 전체 원고를 넣는다."""
-    result = call_openai_structured(instructions, str(text), schema, "tts_style_conversion", "low")
+변환한 원고를 통역 청취용 의미 구절로 충분히 촘촘하게 분할한다. {segment_rule} 하되, 글자 수보다 문법적으로 완결된 의미 단위를 우선한다. 긴 문장은 쉼표 개수보다 더 많은 구절로 나눌 수 있다. 한 문장이 80자 이상이면 특별한 이유가 없는 한 최소 5개 이상의 구절로 나눈다.
+
+{language_rules}
+
+각 segment의 text는 실제로 읽을 문자열이며 모든 내용이 원래 순서대로 정확히 한 번씩 포함되어야 한다. 구절 뒤가 같은 문장 안의 의미 단위 경계면 boundary=phrase, 문장 끝이면 sentence, 문단 끝이면 paragraph로 표시한다. converted_text에는 모든 segment text를 자연스러운 공백과 문단으로 이어 붙인 전체 원고를 넣는다."""
+    result = call_openai_structured(instructions, str(text), schema, "tts_style_conversion", "medium")
     converted = str(result.get("converted_text", "")).strip()
     segments = [
         {"text": str(item.get("text", "")).strip(), "boundary": item.get("boundary", "phrase")}
@@ -953,6 +999,22 @@ def convert_tts_style(text, language):
     ]
     if not converted or not segments:
         raise RuntimeError("읽기용 문체 변환 결과가 비어 있습니다.")
+    if _tts_segments_too_coarse(segments, language):
+        refinement_instructions = f"""다음 {language} 낭독 원고의 내용, 글자, 문장부호, 순서를 전혀 바꾸지 말고 의미 구절만 더 촘촘하게 다시 나눈다. {segment_rule} 한다.
+
+{language_rules}
+
+긴 문장은 쉼표가 적더라도 주제·종속절·긴 목적어·내용절·최종 서술어를 기준으로 적극적으로 나눈다. 모든 글자가 정확히 한 번씩 포함되어야 한다. 같은 문장 안의 경계는 phrase, 문장 끝은 sentence, 문단 끝은 paragraph다. converted_text에는 입력 원고를 그대로 반환한다."""
+        refined = call_openai_structured(refinement_instructions, converted, schema, "tts_segment_refinement", "medium")
+        refined_segments = [
+            {"text": str(item.get("text", "")).strip(), "boundary": item.get("boundary", "phrase")}
+            for item in refined.get("segments", []) if str(item.get("text", "")).strip()
+        ]
+        refined_joined = "".join(segment["text"] for segment in refined_segments)
+        if refined_segments and _normalized_tts_text(refined_joined) == _normalized_tts_text(converted):
+            segments = refined_segments
+        if _tts_segments_too_coarse(segments, language):
+            raise RuntimeError("의미 구절이 충분히 자연스럽고 촘촘하게 나뉘지 않았습니다. 같은 원고로 음성 생성을 한 번 더 눌러주세요.")
     # The segmented text is authoritative because these exact units are spoken.
     # Rebuild the preview from them so character counts and target duration match.
     rebuilt = ""
@@ -1144,6 +1206,7 @@ def tts_page():
                 st.session_state["tts_target_seconds"] = converted_target
                 st.session_state["tts_character_count"] = converted_count
                 st.session_state["tts_converted_text"] = converted_text
+                st.session_state["tts_segment_texts"] = [segment["text"] for segment in prepared["segments"]]
                 st.session_state["tts_segment_count"] = len(prepared["segments"])
                 st.success(f"{len(prepared['segments'])}개 의미 구절의 음성을 생성했습니다.")
             except Exception as exc:
@@ -1154,6 +1217,8 @@ def tts_page():
         render_paced_tts_player(audio, st.session_state["tts_target_seconds"], language, st.session_state["tts_character_count"])
         with st.expander("읽기용으로 변환된 문체 확인"):
             st.write(st.session_state.get("tts_converted_text", text.strip()))
+        with st.expander("의미 구절 나눔 확인"):
+            st.write(" / ".join(st.session_state.get("tts_segment_texts", [])))
     elif audio:
         st.info("언어나 텍스트가 변경되었습니다. 새 내용으로 음성을 다시 생성해주세요.")
 
