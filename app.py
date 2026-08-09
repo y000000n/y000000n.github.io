@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from datetime import date, datetime, timedelta
 from html import unescape
 from html.parser import HTMLParser
@@ -784,6 +785,116 @@ def terminology_extraction():
         st.info("설정한 기준에 해당하는 고유명사나 전문용어를 찾지 못했습니다.")
 
 
+def tts_target_duration(text, language):
+    character_count = len(re.sub(r"\s+", "", str(text or "")))
+    characters_per_minute = 200 if language == "한국어" else 1000 / 6
+    return character_count, character_count / characters_per_minute * 60 if character_count else 0
+
+
+def generate_tts_audio(text):
+    api_key = openai_api_key()
+    if not api_key:
+        raise ValueError("Streamlit Secrets에 OPENAI_API_KEY가 없습니다.")
+    payload = {
+        "model": "tts-1",
+        "input": text,
+        "voice": "alloy",
+        "response_format": "mp3",
+        "speed": 0.75,
+    }
+    request = Request(
+        "https://api.openai.com/v1/audio/speech",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=180, context=ssl.create_default_context(cafile=certifi.where())) as response:
+            audio = response.read(25_000_001)
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")
+        raise RuntimeError(f"OpenAI 음성 API 오류({exc.code}): {detail[:400]}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"OpenAI 음성 API 연결 실패: {exc.reason}") from exc
+    if not audio:
+        raise RuntimeError("생성된 음성이 비어 있습니다.")
+    if len(audio) > 25_000_000:
+        raise RuntimeError("생성된 음성 파일이 너무 큽니다. 텍스트를 나누어 다시 시도해주세요.")
+    return audio
+
+
+def _format_duration(seconds):
+    seconds = max(0, int(round(seconds)))
+    return f"{seconds // 60}분 {seconds % 60:02d}초"
+
+
+def render_paced_tts_player(audio_bytes, target_seconds, language, character_count):
+    encoded = base64.b64encode(audio_bytes).decode("ascii")
+    components.html(f"""<!doctype html><html lang="ko"><head><meta charset="utf-8"><style>
+    *{{box-sizing:border-box}}body{{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#1f2937}}
+    .player{{border:1px solid #e1e6ef;border-radius:14px;padding:18px;background:#fff}}
+    .meta{{color:#667085;font-size:13px;margin-bottom:12px}}.controls{{display:flex;align-items:center;gap:10px}}
+    button{{border:0;border-radius:9px;padding:9px 15px;background:#315a9c;color:white;font-weight:700;cursor:pointer}}
+    button.secondary{{background:#eef2f8;color:#315a9c}}input[type=range]{{flex:1;accent-color:#315a9c}}
+    .time{{font-variant-numeric:tabular-nums;font-size:13px;min-width:92px;text-align:right}}.status{{margin-top:11px;font-size:13px;color:#475467}}
+    </style></head><body><div class="player">
+    <div class="meta">{language} · 공백 제외 {character_count:,}자 · 목표 {_format_duration(target_seconds)}</div>
+    <audio id="audio" preload="metadata" src="data:audio/mpeg;base64,{encoded}"></audio>
+    <div class="controls"><button id="toggle">▶ 재생</button><button id="reset" class="secondary">처음으로</button><input id="seek" type="range" min="0" max="1000" value="0"><span id="time" class="time">0:00 / --:--</span></div>
+    <div id="status" class="status">음성 길이를 확인하고 목표 속도로 맞추는 중입니다…</div>
+    </div><script>
+    const audio=document.getElementById('audio'), toggle=document.getElementById('toggle'), reset=document.getElementById('reset');
+    const seek=document.getElementById('seek'), time=document.getElementById('time'), status=document.getElementById('status');
+    const target={float(target_seconds):.4f}; let rate=1;
+    const clock=(s)=>{{s=Math.max(0,Math.round(s||0));return `${{Math.floor(s/60)}}:${{String(s%60).padStart(2,'0')}}`;}};
+    const update=()=>{{const total=audio.duration&&isFinite(audio.duration)?audio.duration/rate:target;const current=(audio.currentTime||0)/rate;time.textContent=`${{clock(current)}} / ${{clock(total)}}`;seek.value=audio.duration?Math.round(audio.currentTime/audio.duration*1000):0;}};
+    audio.addEventListener('loadedmetadata',()=>{{const proposed=audio.duration/target;rate=Math.min(4,Math.max(.25,proposed));audio.defaultPlaybackRate=rate;audio.playbackRate=rate;audio.preservesPitch=true;audio.webkitPreservesPitch=true;const exact=Math.abs(rate-proposed)<.001;status.textContent=`목표 재생시간 ${{clock(target)}} · 자동 보정 ${{rate.toFixed(2)}}배속${{exact?'':' · 브라우저 지원 범위 내에서 조정'}}`;update();}});
+    audio.addEventListener('timeupdate',update);audio.addEventListener('play',()=>toggle.textContent='❚❚ 일시정지');
+    audio.addEventListener('pause',()=>toggle.textContent='▶ 재생');audio.addEventListener('ended',()=>{{toggle.textContent='▶ 다시 재생';update();}});
+    toggle.addEventListener('click',()=>{{audio.playbackRate=rate;if(audio.ended)audio.currentTime=0;audio.paused?audio.play():audio.pause();}});
+    reset.addEventListener('click',()=>{{audio.pause();audio.currentTime=0;update();}});
+    seek.addEventListener('input',()=>{{if(audio.duration)audio.currentTime=Number(seek.value)/1000*audio.duration;update();}});
+    </script></body></html>""", height=180)
+
+
+def tts_page():
+    hero("TTS", "한국어와 일본어 스크립트를 통역 연습용 목표 속도로 들어보세요.")
+    if not openai_api_key():
+        st.warning("음성을 생성하려면 Streamlit Secrets에 OPENAI_API_KEY를 등록해야 합니다.")
+    language = st.segmented_control("언어", ["한국어", "일본어"], default="한국어", key="tts_language")
+    target_label = "1,200자당 6분 · 분당 200자" if language == "한국어" else "1,000자당 6분 · 분당 약 167자"
+    st.caption(f"목표 속도 · {target_label} · 글자 수는 공백을 제외하고 계산합니다.")
+    text = st.text_area("읽을 텍스트", height=320, placeholder="한국어 또는 일본어 스크립트를 입력하세요.", key="tts_text")
+    character_count, target_seconds = tts_target_duration(text, language)
+    a, b = st.columns(2)
+    a.metric("공백 제외 글자 수", f"{character_count:,}자")
+    b.metric("목표 재생시간", _format_duration(target_seconds))
+    st.caption("한 번에 최대 4,000자까지 생성할 수 있습니다. 이 음성은 AI가 생성합니다.")
+    if st.button("음성 생성", type="primary", use_container_width=True, key="tts_generate"):
+        clean_text = text.strip()
+        if not clean_text or character_count == 0:
+            st.error("읽을 텍스트를 입력해주세요.")
+        elif len(clean_text) > 4_000:
+            st.error("텍스트가 4,000자를 초과합니다. 여러 부분으로 나누어 생성해주세요.")
+        else:
+            try:
+                with st.spinner("음성을 생성하고 목표 속도를 계산하고 있습니다…"):
+                    audio = generate_tts_audio(clean_text)
+                st.session_state["tts_audio"] = audio
+                st.session_state["tts_signature"] = (language, clean_text)
+                st.session_state["tts_target_seconds"] = target_seconds
+                st.session_state["tts_character_count"] = character_count
+                st.success("음성을 생성했습니다.")
+            except Exception as exc:
+                st.error(str(exc))
+    audio = st.session_state.get("tts_audio")
+    if audio and st.session_state.get("tts_signature") == (language, text.strip()):
+        st.subheader("재생")
+        render_paced_tts_player(audio, st.session_state["tts_target_seconds"], language, st.session_state["tts_character_count"])
+    elif audio:
+        st.info("언어나 텍스트가 변경되었습니다. 새 내용으로 음성을 다시 생성해주세요.")
+
+
 def script_feedback():
     hero("스크립트 피드백", "AI가 원문과 실제 통역문을 문장별로 정렬해 누락·오역·표현·유창성을 분석합니다.")
     if not openai_api_key():
@@ -992,7 +1103,7 @@ def records_manager():
                 st.rerun()
 
 
-pages = {"대시보드": dashboard, "통역 연습": practice, "언어쌍": language_pairs, "리뷰": review, "스크립트 피드백": script_feedback, "고유명사·전문용어 추출": terminology_extraction, "스크립트 복습": script_review, "공부 자료": study_materials, "공부 메모": study_notes, "통계": statistics}
+pages = {"대시보드": dashboard, "통역 연습": practice, "언어쌍": language_pairs, "리뷰": review, "스크립트 피드백": script_feedback, "고유명사·전문용어 추출": terminology_extraction, "TTS": tts_page, "스크립트 복습": script_review, "공부 자료": study_materials, "공부 메모": study_notes, "통계": statistics}
 st.sidebar.title("🎧 통역 플래너")
 st.sidebar.caption(f"저장소 · {db.backend_name()}")
 selection = st.sidebar.radio("메뉴", list(pages), label_visibility="collapsed")
