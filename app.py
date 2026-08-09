@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from html import escape, unescape
 from html.parser import HTMLParser
@@ -902,42 +903,70 @@ def terminology_extraction():
 
 def tts_target_duration(text, language):
     character_count = len(re.sub(r"\s+", "", str(text or "")))
-    characters_per_minute = 200 if language == "한국어" else 1000 / 6
+    characters_per_minute = 1150 / 6 if language == "한국어" else 950 / 6
     return character_count, character_count / characters_per_minute * 60 if character_count else 0
+
+
+def tts_target_range(text, language):
+    character_count = len(re.sub(r"\s+", "", str(text or "")))
+    if not character_count:
+        return 0, 0
+    fastest_cpm, slowest_cpm = ((1200 / 6, 1100 / 6) if language == "한국어" else (1000 / 6, 900 / 6))
+    return character_count / fastest_cpm * 60, character_count / slowest_cpm * 60
 
 
 def convert_tts_style(text, language):
     schema = {
         "type": "object",
         "additionalProperties": False,
-        "properties": {"converted_text": {"type": "string"}},
-        "required": ["converted_text"],
+        "properties": {
+            "converted_text": {"type": "string"},
+            "segments": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "text": {"type": "string"},
+                        "boundary": {"type": "string", "enum": ["phrase", "sentence", "paragraph"]},
+                    },
+                    "required": ["text", "boundary"],
+                },
+            },
+        },
+        "required": ["converted_text", "segments"],
     }
     if language == "한국어":
         style = "기사문·문어체의 종결형(~다, ~이다, ~한다, ~했다, ~됐다, ~있다 등)을 자연스러운 격식체 낭독형(-ㅂ니다/-습니다/-입니다)으로 바꾼다."
     else:
         style = "記事文の常体（〜だ、〜である、〜する、〜した等）を自然な敬体（です・ます調）に変え、活用も文法的に整える。"
+    segment_rule = "한 구절은 공백 제외 대체로 25~55자로" if language == "한국어" else "一つの区切りは空白を除き、おおむね20〜50文字に"
     instructions = f"""당신은 뉴스 원고 낭독 편집자다. 입력문의 언어는 {language}다. {style}
-원문의 의미, 정보량, 문장 순서, 문단, 인명, 고유명사, 숫자, 단위, 인용 내용은 절대 바꾸지 않는다. 요약·번역·해설·정보 추가·삭제를 하지 않는다. 이미 요청한 문체인 문장은 그대로 둔다. 낭독할 때 의미 단위가 자연스럽게 구분되도록 구절 경계에는 쉼표(한국어 , / 일본어 、)를 최소한으로 보완하고, 문장 끝 문장부호는 명확히 유지한다. 말줄임표를 새로 만들거나 불필요하게 문장을 쪼개지 않는다. 결과에는 변환된 본문만 넣는다."""
+원문의 의미, 정보량, 문장 순서, 문단, 인명, 고유명사, 숫자, 단위, 인용 내용은 절대 바꾸지 않는다. 요약·번역·해설·정보 추가·삭제를 하지 않는다. 이미 요청한 문체인 문장은 그대로 둔다. 문장부호를 자연스럽게 정돈하되 말줄임표를 새로 만들지 않는다.
+
+변환한 원고를 통역 청취용 의미 구절로 촘촘히 분할한다. {segment_rule} 하되, 주어·서술어·수식 관계와 고유명사 덩어리를 훼손하지 않는다. 각 segment의 text는 실제로 읽을 문자열이며 모든 내용이 원래 순서대로 정확히 한 번씩 포함되어야 한다. 구절 뒤가 같은 문장 안의 의미 단위 경계면 boundary=phrase, 문장 끝이면 sentence, 문단 끝이면 paragraph로 표시한다. converted_text에는 모든 segment text를 자연스러운 공백과 문단으로 이어 붙인 전체 원고를 넣는다."""
     result = call_openai_structured(instructions, str(text), schema, "tts_style_conversion", "low")
     converted = str(result.get("converted_text", "")).strip()
-    if not converted:
+    segments = [
+        {"text": str(item.get("text", "")).strip(), "boundary": item.get("boundary", "phrase")}
+        for item in result.get("segments", []) if str(item.get("text", "")).strip()
+    ]
+    if not converted or not segments:
         raise RuntimeError("읽기용 문체 변환 결과가 비어 있습니다.")
-    return converted
+    # The segmented text is authoritative because these exact units are spoken.
+    # Rebuild the preview from them so character counts and target duration match.
+    rebuilt = ""
+    for segment in segments:
+        rebuilt += segment["text"]
+        rebuilt += "\n\n" if segment["boundary"] == "paragraph" else " "
+    return {"converted_text": rebuilt.strip(), "segments": segments}
 
 
-def generate_tts_audio(text, language):
-    api_key = openai_api_key()
-    if not api_key:
-        raise ValueError("Streamlit Secrets에 OPENAI_API_KEY가 없습니다.")
+def _generate_tts_segment(text, language, api_key):
     pause_instructions = (
-        "한국어 뉴스 앵커처럼 또렷하고 자연스럽게 읽으세요. 발화 자체는 정상 1.0 속도로 유지하고 음절을 느리게 늘이지 마세요. "
-        "쉼표와 자연스러운 의미 구절 경계에서는 약 0.5초 짧게 쉬고, 마침표·물음표·느낌표와 문단 끝에서는 약 1.0초로 더 길게 쉬세요. "
-        "숫자와 고유명사를 정확히 발음하고, 전체적으로 차분한 통역 연습용 낭독을 하세요."
+        "주어진 한국어 구절만 정확히 한 번 읽으세요. 다른 말은 추가하지 마세요. 한국어 뉴스 앵커처럼 또렷하고 자연스러운 정상 1.0 속도로 읽고, 음절을 늘이지 마세요. 숫자와 고유명사를 정확히 발음하세요."
         if language == "한국어" else
-        "日本語のニュースアナウンサーのように、明瞭で自然に読んでください。発話そのものは通常の1.0倍速に保ち、音節を間延びさせないでください。"
-        "読点と自然な意味のまとまりでは約0.5秒短く休み、句点・疑問符・感嘆符と段落末では約1.0秒と、より長く休んでください。"
-        "数字と固有名詞を正確に発音し、落ち着いた通訳練習向けの読み方にしてください。"
+        "与えられた日本語の一区切りだけを正確に一度読み、別の言葉を加えないでください。ニュースアナウンサーのように明瞭で自然な通常の1.0倍速で読み、音節を間延びさせないでください。数字と固有名詞を正確に発音してください。"
     )
     payload = {
         "model": "gpt-4o-mini-tts",
@@ -968,13 +997,48 @@ def generate_tts_audio(text, language):
     return audio
 
 
+def generate_tts_audio(segments, language):
+    api_key = openai_api_key()
+    if not api_key:
+        raise ValueError("Streamlit Secrets에 OPENAI_API_KEY가 없습니다.")
+    if not segments:
+        raise ValueError("음성으로 생성할 구절이 없습니다.")
+    results = [None] * len(segments)
+    workers = min(6, len(segments))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        pending = {
+            executor.submit(_generate_tts_segment, segment["text"], language, api_key): index
+            for index, segment in enumerate(segments)
+        }
+        for future in as_completed(pending):
+            index = pending[future]
+            try:
+                results[index] = {
+                    "audio": future.result(),
+                    "characters": len(re.sub(r"\s+", "", segments[index]["text"])),
+                    "boundary": segments[index].get("boundary", "phrase"),
+                }
+            except Exception as exc:
+                raise RuntimeError(f"{index + 1}번째 구절 음성 생성 실패: {exc}") from exc
+    return results
+
+
 def _format_duration(seconds):
     seconds = max(0, int(round(seconds)))
     return f"{seconds // 60}분 {seconds % 60:02d}초"
 
 
-def render_paced_tts_player(audio_bytes, target_seconds, language, character_count):
-    encoded = base64.b64encode(audio_bytes).decode("ascii")
+def render_paced_tts_player(audio_segments, target_seconds, language, character_count):
+    sources = [
+        {
+            "src": "data:audio/mpeg;base64," + base64.b64encode(segment["audio"]).decode("ascii"),
+            "characters": segment["characters"],
+            "boundary": segment["boundary"],
+        }
+        for segment in audio_segments
+    ]
+    sources_json = json.dumps(sources, ensure_ascii=False).replace("</", "<\\/")
+    standard = "1,150자/6분" if language == "한국어" else "950자/6분"
     components.html(f"""<!doctype html><html lang="ko"><head><meta charset="utf-8"><style>
     *{{box-sizing:border-box}}body{{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#1f2937}}
     .player{{border:1px solid #e1e6ef;border-radius:14px;padding:18px;background:#fff}}
@@ -983,32 +1047,48 @@ def render_paced_tts_player(audio_bytes, target_seconds, language, character_cou
     button.secondary{{background:#eef2f8;color:#315a9c}}input[type=range]{{flex:1;accent-color:#315a9c}}
     .time{{font-variant-numeric:tabular-nums;font-size:13px;min-width:92px;text-align:right}}.status{{margin-top:11px;font-size:13px;color:#475467}}
     </style></head><body><div class="player">
-    <div class="meta">{language} · 공백 제외 {character_count:,}자 · 1.0배속 발화 + 구절·문장 휴지</div>
-    <audio id="audio" preload="metadata" src="data:audio/mpeg;base64,{encoded}"></audio>
+    <div class="meta">{language} · 공백 제외 {character_count:,}자 · 시험 기준 {standard} · 발화 1.0배속</div>
     <div class="controls"><button id="toggle">▶ 재생</button><button id="reset" class="secondary">처음으로</button><input id="seek" type="range" min="0" max="1000" value="0"><span id="time" class="time">0:00 / --:--</span></div>
-    <div id="status" class="status">음성 길이를 확인하는 중입니다…</div>
+    <div id="status" class="status">각 구절의 음성 길이를 측정하고 시험 기준에 맞춰 휴지를 계산하는 중입니다…</div>
     </div><script>
-    const audio=document.getElementById('audio'), toggle=document.getElementById('toggle'), reset=document.getElementById('reset');
-    const seek=document.getElementById('seek'), time=document.getElementById('time'), status=document.getElementById('status');
-    const target={float(target_seconds):.4f}; const rate=1;
+    const items={sources_json};
+    const probes=items.map(item=>{{const audio=new Audio(item.src);audio.preload='metadata';return audio;}});
+    const player=new Audio();player.preload='auto';player.playbackRate=1;
+    const toggle=document.getElementById('toggle'), reset=document.getElementById('reset'),seek=document.getElementById('seek'),time=document.getElementById('time'),status=document.getElementById('status');
+    const target={float(target_seconds):.4f};let durations=[],gaps=[],total=target,index=0,phase='idle',playing=false,pauseProgress=0,pauseStarted=0,pauseTimer=null,ready=false;
     const clock=(s)=>{{s=Math.max(0,Math.round(s||0));return `${{Math.floor(s/60)}}:${{String(s%60).padStart(2,'0')}}`;}};
-    const update=()=>{{const total=audio.duration&&isFinite(audio.duration)?audio.duration/rate:target;const current=(audio.currentTime||0)/rate;time.textContent=`${{clock(current)}} / ${{clock(total)}}`;seek.value=audio.duration?Math.round(audio.currentTime/audio.duration*1000):0;}};
-    audio.addEventListener('loadedmetadata',()=>{{audio.defaultPlaybackRate=1;audio.playbackRate=1;audio.preservesPitch=true;audio.webkitPreservesPitch=true;status.textContent=`재생시간 ${{clock(audio.duration)}} · 발화 1.0배속 · 구절 약 0.5초 / 문장 약 1.0초 휴지`;update();}});
-    audio.addEventListener('timeupdate',update);audio.addEventListener('play',()=>toggle.textContent='❚❚ 일시정지');
-    audio.addEventListener('pause',()=>toggle.textContent='▶ 재생');audio.addEventListener('ended',()=>{{toggle.textContent='▶ 다시 재생';update();}});
-    toggle.addEventListener('click',()=>{{audio.playbackRate=1;if(audio.ended)audio.currentTime=0;audio.paused?audio.play():audio.pause();}});
-    reset.addEventListener('click',()=>{{audio.pause();audio.currentTime=0;update();}});
-    seek.addEventListener('input',()=>{{if(audio.duration)audio.currentTime=Number(seek.value)/1000*audio.duration;update();}});
+    const before=(i)=>durations.slice(0,i).reduce((a,b)=>a+b,0)+gaps.slice(0,i).reduce((a,b)=>a+b,0);
+    const position=()=>{{if(index>=items.length)return total;const base=before(index);if(phase==='pause')return base+durations[index]+pauseProgress+(playing?(performance.now()-pauseStarted)/1000:0);return base+(player.currentTime||0);}};
+    const update=()=>{{const current=Math.min(total,position());time.textContent=`${{clock(current)}} / ${{clock(total)}}`;seek.value=total?Math.round(current/total*1000):0;}};
+    const stopTimer=()=>{{if(pauseTimer)clearTimeout(pauseTimer);pauseTimer=null;}};
+    const finishAll=()=>{{playing=false;phase='ended';index=items.length;toggle.textContent='▶ 다시 재생';update();}};
+    const loadCurrent=(offset,shouldPlay)=>{{if(index>=items.length){{finishAll();return}}phase='audio';const begin=()=>{{player.currentTime=Math.min(Math.max(0,offset||0),Math.max(0,durations[index]-.02));player.playbackRate=1;if(shouldPlay)player.play().catch(()=>{{playing=false;toggle.textContent='▶ 재생';status.textContent='재생이 차단되었습니다. 재생 버튼을 다시 눌러주세요.';}});}};if(player.dataset.index!==String(index)){{player.dataset.index=String(index);player.src=items[index].src;player.load();if(player.readyState>=1)begin();else player.addEventListener('loadedmetadata',begin,{{once:true}});}}else begin();if(shouldPlay)toggle.textContent='❚❚ 일시정지';}};
+    const playCurrent=()=>loadCurrent(player.dataset.index===String(index)?player.currentTime:0,true);
+    const schedulePause=()=>{{phase='pause';pauseStarted=performance.now();const remaining=Math.max(0,gaps[index]-pauseProgress);pauseTimer=setTimeout(()=>{{pauseProgress=0;index+=1;if(playing)playCurrent();}},remaining*1000);}};
+    player.addEventListener('timeupdate',update);player.addEventListener('ended',()=>{{pauseProgress=0;if(gaps[index]>0&&playing)schedulePause();else{{index+=1;if(playing)playCurrent();}}}});
+    Promise.all(probes.map(audio=>new Promise((resolve,reject)=>{{if(audio.readyState>=1)resolve();else{{audio.addEventListener('loadedmetadata',resolve,{{once:true}});audio.addEventListener('error',reject,{{once:true}});}}}}))).then(()=>{{
+      durations=probes.map(audio=>audio.duration);const speech=durations.reduce((a,b)=>a+b,0);const available=Math.max(0,target-speech);
+      const base=items.map((item,i)=>i === items.length - 1 ? 0.35 : (item.boundary==='paragraph'?1.8:item.boundary==='sentence'?1.35:0.7));
+      const baseTotal=base.reduce((a,b)=>a+b,0);const minimum=baseTotal>available&&baseTotal?base.map(x=>x*available/baseTotal):base;
+      const remaining=Math.max(0,available-minimum.reduce((a,b)=>a+b,0));
+      const weights=items.map((item,i)=>Math.sqrt(Math.max(1,item.characters))*(i === items.length - 1 ? 0.35 : item.boundary==='paragraph'?2.2:item.boundary==='sentence'?1.65:1));const weightTotal=weights.reduce((a,b)=>a+b,0)||1;
+      gaps=minimum.map((value,i)=>value+remaining*weights[i]/weightTotal);total=speech+gaps.reduce((a,b)=>a+b,0);ready=true;
+      const equivalent={character_count}/(total/60);status.textContent=`시험 기준 재생시간 ${{clock(target)}} · 실제 ${{clock(total)}} · 분당 ${{equivalent.toFixed(1)}}자 · ${{items.length}}개 의미 구절의 가변 휴지`;update();
+    }}).catch(()=>{{status.textContent='음성 정보를 불러오지 못했습니다. 음성을 다시 생성해주세요.';}});
+    toggle.addEventListener('click',()=>{{if(!ready)return;if(phase==='ended'||index>=items.length){{index=0;phase='idle';pauseProgress=0;player.dataset.index='';}}if(playing){{playing=false;if(phase==='audio')player.pause();else if(phase==='pause'){{pauseProgress+=Math.max(0,(performance.now()-pauseStarted)/1000);stopTimer();}}toggle.textContent='▶ 재생';}}else{{playing=true;if(phase==='pause')schedulePause();else playCurrent();}}}});
+    reset.addEventListener('click',()=>{{stopTimer();playing=false;player.pause();player.currentTime=0;player.dataset.index='';index=0;phase='idle';pauseProgress=0;toggle.textContent='▶ 재생';update();}});
+    seek.addEventListener('change',()=>{{if(!ready)return;const wasPlaying=playing;stopTimer();player.pause();const wanted=Number(seek.value)/1000*total;let cursor=0;for(let i=0;i<items.length;i++){{if(wanted<=cursor+durations[i]){{index=i;pauseProgress=0;loadCurrent(Math.max(0,wanted-cursor),wasPlaying);update();return}}cursor+=durations[i];if(wanted<=cursor+gaps[i]){{index=i;phase='pause';pauseProgress=Math.max(0,wanted-cursor);if(wasPlaying)schedulePause();update();return}}cursor+=gaps[i];}}finishAll();}});
+    setInterval(update,200);
     </script></body></html>""", height=180)
 
 
 def tts_page():
-    hero("TTS", "발화는 자연스러운 1.0배속으로 유지하고, 의미 구절과 문장 사이의 휴지로 통역 호흡을 만듭니다.")
+    hero("TTS", "졸업시험 속도를 기준으로 실제 음성 길이를 측정하고, 의미 구절마다 가변 휴지를 배분합니다.")
     if not openai_api_key():
         st.warning("음성을 생성하려면 Streamlit Secrets에 OPENAI_API_KEY를 등록해야 합니다.")
     language = st.segmented_control("언어", ["한국어", "일본어"], default="한국어", key="tts_language")
-    target_label = "1,200자당 6분 · 분당 200자" if language == "한국어" else "1,000자당 6분 · 분당 약 167자"
-    st.caption(f"기존 분량 기준 참고 · {target_label} · 실제 음성은 1.0배속 발화와 단계별 휴지로 생성합니다.")
+    target_label = "6분당 1,100~1,200자 · 기준 1,150자" if language == "한국어" else "6분당 900~1,000자 · 기준 950자"
+    st.caption(f"졸업시험 속도 · {target_label} · 발화는 1.0배속이며 전체 시간은 가변 휴지로 맞춥니다.")
     st.markdown("#### 기사에서 본문 불러오기")
     url_col, load_col = st.columns([5, 1])
     article_url = url_col.text_input(
@@ -1038,10 +1118,12 @@ def tts_page():
         st.caption(f"불러온 기사 · {loaded_title}")
     text = st.text_area("읽을 텍스트", height=320, placeholder="한국어 또는 일본어 스크립트를 입력하세요.", key="tts_text")
     character_count, target_seconds = tts_target_duration(text, language)
-    a, b = st.columns(2)
+    range_min, range_max = tts_target_range(text, language)
+    a, b, c = st.columns(3)
     a.metric("공백 제외 글자 수", f"{character_count:,}자")
-    b.metric("분량 기준 시간", _format_duration(target_seconds))
-    st.caption("발화 속도를 인위적으로 늦추지 않습니다. 구절 경계에서는 약 0.5초, 문장·문단 끝에서는 약 1.0초 쉬도록 생성합니다. 한국어 기사체는 -ㅂ니다/-습니다체로, 일본어 だ・である체는 です・ます調로 자동 변환합니다.")
+    b.metric("적용 목표 시간", _format_duration(target_seconds))
+    c.metric("시험 허용 시간", f"{_format_duration(range_min)}~{_format_duration(range_max)}")
+    st.caption("원고를 20~55자 안팎의 의미 구절로 나누고 실제 발화 길이를 측정합니다. 목표 시간까지 남은 분량은 긴 구절 뒤에 더 길게, 짧은 구절 뒤에 더 짧게 배분하며 문장·문단 끝에는 추가 가중치를 둡니다.")
     if st.button("음성 생성", type="primary", use_container_width=True, key="tts_generate"):
         clean_text = text.strip()
         if not clean_text or character_count == 0:
@@ -1050,18 +1132,20 @@ def tts_page():
             st.error("텍스트가 4,000자를 초과합니다. 여러 부분으로 나누어 생성해주세요.")
         else:
             try:
-                with st.spinner("문체와 호흡 지점을 정돈한 뒤 1.0배속 음성을 생성하고 있습니다…"):
-                    converted_text = convert_tts_style(clean_text, language)
+                with st.spinner("의미 구절을 나누고 각 구절의 1.0배속 음성을 생성하고 있습니다…"):
+                    prepared = convert_tts_style(clean_text, language)
+                    converted_text = prepared["converted_text"]
                     if len(converted_text) > 4_000:
                         raise ValueError("문체 변환 후 텍스트가 4,000자를 초과했습니다. 원문을 여러 부분으로 나누어 생성해주세요.")
                     converted_count, converted_target = tts_target_duration(converted_text, language)
-                    audio = generate_tts_audio(converted_text, language)
+                    audio = generate_tts_audio(prepared["segments"], language)
                 st.session_state["tts_audio"] = audio
                 st.session_state["tts_signature"] = (language, clean_text)
                 st.session_state["tts_target_seconds"] = converted_target
                 st.session_state["tts_character_count"] = converted_count
                 st.session_state["tts_converted_text"] = converted_text
-                st.success("음성을 생성했습니다.")
+                st.session_state["tts_segment_count"] = len(prepared["segments"])
+                st.success(f"{len(prepared['segments'])}개 의미 구절의 음성을 생성했습니다.")
             except Exception as exc:
                 st.error(str(exc))
     audio = st.session_state.get("tts_audio")
