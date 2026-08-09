@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from html import unescape
+from html.parser import HTMLParser
+import ipaddress
 import json
 import random
 import re
+import socket
 import ssl
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.parse import urlparse
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 import pandas as pd
 import certifi
@@ -457,34 +462,262 @@ def is_ai_feedback(value):
         return False
 
 
+class _ArticleHTMLParser(HTMLParser):
+    """Extract likely article paragraphs and JSON-LD articleBody without extra packages."""
+
+    _SKIP_TAGS = {"script", "style", "noscript", "svg", "nav", "footer", "header", "aside", "form"}
+    _ARTICLE_HINT = re.compile(r"(?:article|story|news|content|본문|article-body|article_body|post-content)", re.I)
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.stack = []
+        self.paragraph = None
+        self.paragraph_score = 0
+        self.paragraphs = []
+        self.json_ld = []
+        self.json_buffer = None
+        self.title_buffer = None
+        self.h1_buffer = None
+        self.title = ""
+        self.meta_title = ""
+
+    def handle_starttag(self, tag, attrs):
+        tag = tag.lower()
+        attrs = dict(attrs)
+        marker = " ".join((attrs.get("id", ""), attrs.get("class", ""), attrs.get("itemprop", "")))
+        parent_skip = self.stack[-1][1] if self.stack else False
+        parent_score = self.stack[-1][2] if self.stack else 0
+        skip = parent_skip or tag in self._SKIP_TAGS
+        score = parent_score + (2 if tag == "article" else 1 if self._ARTICLE_HINT.search(marker) else 0)
+        self.stack.append((tag, skip, score))
+        if tag == "meta" and (attrs.get("property") == "og:title" or attrs.get("name") in {"title", "twitter:title"}):
+            self.meta_title = attrs.get("content", "").strip() or self.meta_title
+        if tag == "script" and "ld+json" in attrs.get("type", "").lower():
+            self.json_buffer = []
+        elif tag == "p" and not skip:
+            self.paragraph, self.paragraph_score = [], score
+        elif tag == "title" and not skip:
+            self.title_buffer = []
+        elif tag == "h1" and not skip:
+            self.h1_buffer = []
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+        self.handle_endtag(tag)
+
+    def handle_data(self, data):
+        if self.json_buffer is not None:
+            self.json_buffer.append(data)
+            return
+        if self.stack and self.stack[-1][1]:
+            return
+        if self.paragraph is not None:
+            self.paragraph.append(data)
+        if self.title_buffer is not None:
+            self.title_buffer.append(data)
+        if self.h1_buffer is not None:
+            self.h1_buffer.append(data)
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        if tag == "script" and self.json_buffer is not None:
+            raw = "".join(self.json_buffer).strip()
+            if raw:
+                self.json_ld.append(raw)
+            self.json_buffer = None
+        if tag == "p" and self.paragraph is not None:
+            text = re.sub(r"\s+", " ", unescape("".join(self.paragraph))).strip()
+            if len(text) >= 20:
+                self.paragraphs.append((self.paragraph_score, text))
+            self.paragraph = None
+        if tag == "title" and self.title_buffer is not None:
+            self.title = re.sub(r"\s+", " ", "".join(self.title_buffer)).strip()
+            self.title_buffer = None
+        if tag == "h1" and self.h1_buffer is not None:
+            heading = re.sub(r"\s+", " ", "".join(self.h1_buffer)).strip()
+            if heading:
+                self.meta_title = self.meta_title or heading
+            self.h1_buffer = None
+        for index in range(len(self.stack) - 1, -1, -1):
+            if self.stack[index][0] == tag:
+                del self.stack[index:]
+                break
+
+    def json_article(self):
+        def walk(value):
+            if isinstance(value, dict):
+                body = value.get("articleBody")
+                if isinstance(body, str) and len(body.strip()) >= 100:
+                    return body, str(value.get("headline", "")).strip()
+                for child in value.values():
+                    found = walk(child)
+                    if found:
+                        return found
+            elif isinstance(value, list):
+                for child in value:
+                    found = walk(child)
+                    if found:
+                        return found
+            return None
+        for raw in self.json_ld:
+            try:
+                found = walk(json.loads(raw))
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if found:
+                return found
+        return None
+
+
+def _validate_public_article_url(value):
+    url = str(value or "").strip()
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("기사 URL은 http:// 또는 https://로 시작해야 합니다.")
+    if parsed.username or parsed.password:
+        raise ValueError("로그인 정보가 포함된 URL은 사용할 수 없습니다.")
+    hostname = parsed.hostname.rstrip(".").lower()
+    if hostname == "localhost" or hostname.endswith(".local"):
+        raise ValueError("공개된 신문기사 URL만 사용할 수 있습니다.")
+    try:
+        addresses = socket.getaddrinfo(hostname, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise ValueError("기사 사이트의 주소를 확인할 수 없습니다.") from exc
+    for address in {item[4][0].split("%", 1)[0] for item in addresses}:
+        try:
+            if not ipaddress.ip_address(address).is_global:
+                raise ValueError("공개된 신문기사 URL만 사용할 수 있습니다.")
+        except ValueError as exc:
+            if "공개된" in str(exc):
+                raise
+            raise ValueError("기사 사이트의 주소를 확인할 수 없습니다.") from exc
+    return url
+
+
+class _SafeArticleRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _validate_public_article_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def fetch_article_text(article_url):
+    url = _validate_public_article_url(article_url)
+    request = Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml",
+        "Accept-Language": "ko,en-US;q=0.8,ja;q=0.7",
+        "Accept-Encoding": "identity",
+    })
+    try:
+        with build_opener(_SafeArticleRedirectHandler()).open(request, timeout=25) as response:
+            _validate_public_article_url(response.geturl())
+            content_type = response.headers.get_content_type()
+            if content_type not in {"text/html", "application/xhtml+xml"}:
+                raise ValueError("HTML 형식의 신문기사만 불러올 수 있습니다.")
+            raw = response.read(2_000_001)
+            if len(raw) > 2_000_000:
+                raise ValueError("기사 페이지가 너무 커서 불러올 수 없습니다.")
+            declared = response.headers.get_content_charset()
+    except HTTPError as exc:
+        if exc.code in {401, 403, 451}:
+            raise RuntimeError("기사 사이트가 자동 본문 수집을 허용하지 않습니다. 기사 본문을 직접 붙여넣어 주세요.") from exc
+        raise RuntimeError(f"기사 페이지를 불러오지 못했습니다. (HTTP {exc.code})") from exc
+    except URLError as exc:
+        raise RuntimeError(f"기사 페이지 연결에 실패했습니다: {exc.reason}") from exc
+    candidates = [declared, "utf-8", "cp949", "euc-kr", "shift_jis"]
+    decoded = []
+    for encoding in dict.fromkeys(x for x in candidates if x):
+        try:
+            text = raw.decode(encoding, errors="replace")
+            decoded.append((text.count("\ufffd"), text))
+        except (LookupError, UnicodeError):
+            continue
+    html_text = min(decoded, key=lambda item: item[0])[1] if decoded else raw.decode("utf-8", "replace")
+    parser = _ArticleHTMLParser()
+    parser.feed(html_text)
+    json_article = parser.json_article()
+    if json_article:
+        body, json_title = json_article
+        article_text = re.sub(r"[ \t]+", " ", unescape(body)).strip()
+        title = json_title or parser.meta_title or parser.title
+    else:
+        preferred = [text for score, text in parser.paragraphs if score > 0]
+        paragraphs = preferred if len("\n".join(preferred)) >= 300 else [text for _, text in parser.paragraphs]
+        article_text = "\n\n".join(dict.fromkeys(paragraphs)).strip()
+        title = parser.meta_title or parser.title
+    if len(article_text) < 200:
+        raise RuntimeError("기사 본문을 충분히 찾지 못했습니다. 로그인·유료벽·자바스크립트 전용 기사라면 본문을 직접 붙여넣어 주세요.")
+    if len(article_text) > 60_000:
+        article_text = article_text[:60_000]
+    return {"title": title.strip(), "text": article_text, "url": url}
+
+
 def extract_terms_ai(text):
-    schema = {"type":"object","additionalProperties":False,"properties":{"terms":{"type":"array","items":{"type":"object","additionalProperties":False,"properties":{"term":{"type":"string"},"category":{"type":"string","enum":["고유명사","전문용어"]},"context":{"type":"string"},"position":{"type":"integer"}},"required":["term","category","context","position"]}}},"required":["terms"]}
-    instructions = """입력 텍스트에서 통역 전에 준비할 가치가 있는 고유명사와 전문용어만 추출한다. 국가명, 수도명, 널리 알려진 국제기구 약칭, 대통령·국회·경제·금리 같은 기초 시사용어, 일반 명사는 제외한다. 인명·기관명·법률명·정책명·사업명·협정명·기술명·학술 개념처럼 고유하거나 전문성이 있는 항목만 남긴다. 중복은 하나로 합치고 term은 원문 표기를 유지한다. context에는 짧은 문맥 또는 의미를 한국어로 적고, position에는 텍스트에서 처음 등장한 문자 위치에 가까운 정수를 넣는다."""
-    return call_openai_structured(instructions, text, schema, "terminology_extraction", "low").get("terms", [])
+    subtypes = ["인명","직책","부서명","팀명","기관·기업명","법률·협정명","정책·사업명","기술·전문개념","기타 고유명사"]
+    schema = {"type":"object","additionalProperties":False,"properties":{"source_language":{"type":"string","enum":["한국어","일본어","혼합"]},"terms":{"type":"array","items":{"type":"object","additionalProperties":False,"properties":{"term":{"type":"string"},"translation":{"type":"string"},"translation_language":{"type":"string","enum":["한국어","일본어"]},"category":{"type":"string","enum":["고유명사","전문용어"]},"subtype":{"type":"string","enum":subtypes},"context":{"type":"string"},"position":{"type":"integer"}},"required":["term","translation","translation_language","category","subtype","context","position"]}}},"required":["source_language","terms"]}
+    instructions = """입력 텍스트에서 한일·일한 통역 준비에 필요한 고유명사와 전문용어를 추출한다.
+
+필수 추출 기준:
+- 인명은 유명도와 관계없이 반드시 모두 추출한다.
+- 직책, 회사·기관의 부서명, 팀명, 위원회명 등 고유명사도 반드시 추출한다.
+- 법률명, 협정명, 정책명, 사업명, 기술명과 '생산가능인구'처럼 뜻을 정확히 준비해야 하는 복잡한 전문 개념을 추출한다.
+
+제외 기준(필수 추출 기준보다 우선한다):
+- 기재부·기획재정부·산업통상부·산업통상자원부·후생성처럼 한국·일본 및 기타 국가의 중앙정부 부처명과 그 약칭은 제외한다.
+- GDP, GNP, 닛케이 지수처럼 일반적인 시사 상식으로 바로 이해되는 지표·용어는 제외한다.
+- 국가명, 수도명, 널리 알려진 국제기구 약칭, 대통령·국회·경제·금리 같은 기초 시사용어와 일반 명사는 제외한다.
+
+출력 기준:
+- term에는 원문 표기를 그대로 쓰고 중복은 하나로 합친다.
+- 한국어 원문 용어에는 자연스럽고 표준적인 일본어 번역을, 일본어 원문 용어에는 자연스러운 한국어 번역을 병기한다. 혼합 텍스트는 각 용어의 원문 언어와 반대 언어로 번역한다.
+- 영문 표기의 용어는 그 용어가 들어 있는 문장이 한국어이면 일본어로, 일본어이면 한국어로 번역한다.
+- 인명·기관명 등 정식 번역을 확정할 수 없으면 널리 쓰이는 표기 또는 음역을 쓰며, 번역을 임의로 만들어내지 않는다.
+- context에는 그 기사에서의 짧은 의미나 역할을 한국어로 적는다.
+- position에는 원문에서 처음 등장한 문자 위치에 가까운 정수를 넣는다.
+- 근거가 없는 용어는 추가하지 않는다."""
+    return call_openai_structured(instructions, text, schema, "terminology_extraction", "low")
 
 
 def terminology_extraction():
-    hero("고유명사·전문용어 추출", "AI가 통역 준비에 필요한 고유명사와 전문용어만 골라 정리합니다.")
+    hero("고유명사·전문용어 추출", "신문기사 URL이나 직접 입력한 텍스트에서 용어를 추출하고 한일 번역을 병기합니다.")
     if not openai_api_key(): st.warning("Streamlit Secrets에 OPENAI_API_KEY를 등록해야 합니다.")
     mode = st.segmented_control("통역 방식", ["동시통역", "순차통역"], default="동시통역")
     st.caption("동시통역은 원문 등장 순서, 순차통역은 순서를 섞어 표시합니다.")
-    text = st.text_area("분석할 텍스트", height=360, placeholder="기사, 연설문 또는 수업 자료를 붙여넣으세요.")
+    article_url = st.text_input("신문기사 URL", placeholder="https://…", help="URL이 입력되어 있으면 해당 기사 본문을 먼저 불러옵니다. 일부 로그인·유료 기사는 직접 붙여넣기가 필요할 수 있습니다.")
+    text = st.text_area("직접 입력할 텍스트", height=280, placeholder="URL을 사용하지 않는 경우 기사, 연설문 또는 수업 자료를 붙여넣으세요.")
     if st.button("용어 추출", type="primary", use_container_width=True):
-        if not text.strip(): st.error("분석할 텍스트를 입력해주세요.")
+        st.session_state["extracted_terms_ready"] = False
+        st.session_state["extracted_terms"] = []
+        st.session_state["extracted_article"] = None
+        if not article_url.strip() and not text.strip(): st.error("신문기사 URL 또는 분석할 텍스트를 입력해주세요.")
         else:
             try:
                 with st.spinner("고유명사와 전문용어를 추출하고 있습니다…"):
-                    terms = extract_terms_ai(text.strip())
+                    article = fetch_article_text(article_url.strip()) if article_url.strip() else None
+                    analysis_text = article["text"] if article else text.strip()
+                    result = extract_terms_ai(analysis_text)
+                    terms = result.get("terms", [])
                 terms.sort(key=lambda x: x.get("position", 0))
                 if mode == "순차통역": random.SystemRandom().shuffle(terms)
                 st.session_state["extracted_terms"] = terms
                 st.session_state["extracted_terms_mode"] = mode
+                st.session_state["extracted_terms_source_language"] = result.get("source_language", "혼합")
+                st.session_state["extracted_article"] = article
+                st.session_state["extracted_terms_ready"] = True
             except Exception as exc: st.error(str(exc))
     terms = st.session_state.get("extracted_terms", [])
     if terms:
+        article = st.session_state.get("extracted_article")
         st.subheader(f"추출 결과 · {len(terms)}개")
-        shown = [{"번호":i, "용어":item["term"], "구분":item["category"], "문맥·의미":item["context"]} for i,item in enumerate(terms, 1)]
+        st.caption(f"원문 언어 · {st.session_state.get('extracted_terms_source_language', '혼합')}")
+        if article:
+            st.caption(f"기사: {article.get('title') or '제목을 찾지 못함'} · 본문 {len(article.get('text','')):,}자")
+            with st.expander("수집한 기사 본문 확인"):
+                st.text(article.get("text", ""))
+        shown = [{"번호":i, "원문 용어":item["term"], "번역":item["translation"], "번역 언어":item["translation_language"], "구분":item["category"], "세부 분류":item["subtype"], "문맥·의미":item["context"]} for i,item in enumerate(terms, 1)]
         st.dataframe(shown, use_container_width=True, hide_index=True)
+    elif st.session_state.get("extracted_terms_ready"):
+        st.info("설정한 기준에 해당하는 고유명사나 전문용어를 찾지 못했습니다.")
 
 
 def script_feedback():
