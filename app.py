@@ -272,8 +272,15 @@ def practice():
                 if source_url.strip() and not source_url.strip().startswith(("http://", "https://")):
                     st.error("자료 URL은 http:// 또는 https://로 시작해야 합니다.")
                 else:
-                    db.add_practice({"practice_date": day.isoformat(), "activity_type": activity_type, "direction": "없음" if activity_type == "shadowing" else direction, "title": title.strip(), "topic": topic.strip(), "source_url": source_url.strip() if activity_type in ("simultaneous", "consecutive") else "", "video_speed": video_speed if activity_type == "simultaneous" else 1.0, "minutes": minutes, "difficulty": difficulty, **errors, "other_notes": notes.strip()})
-                    st.success("연습 기록을 저장했습니다.")
+                    try:
+                        db.add_practice({"practice_date": day.isoformat(), "activity_type": activity_type, "direction": "없음" if activity_type == "shadowing" else direction, "title": title.strip(), "topic": topic.strip(), "source_url": source_url.strip() if activity_type in ("simultaneous", "consecutive") else "", "video_speed": video_speed if activity_type == "simultaneous" else 1.0, "minutes": minutes, "difficulty": difficulty, **errors, "other_notes": notes.strip()})
+                        st.success("연습 기록을 저장했습니다.")
+                    except Exception as exc:
+                        detail = str(exc)
+                        if activity_type == "shadowing" and any(word in detail.lower() for word in ("direction", "constraint", "check")):
+                            st.error("Supabase의 기존 방향 제한을 갱신해야 합니다. Supabase SQL Editor에서 `supabase_update_v9.sql`을 한 번 실행한 뒤 다시 저장해주세요.")
+                        else:
+                            st.error(detail)
     st.subheader("최근 기록")
     rows = [{"날짜":r["practice_date"], "연습유형":ACTIVITY_LABELS.get(r["activity_type"], r["activity_type"]), "방향":"—" if r["activity_type"]=="shadowing" else r["direction"], "자료":r["title"], "주제":r["topic"], "URL":r.get("source_url", ""), "속도":f"×{r.get('video_speed',1.0):.2f}" if r["activity_type"]=="simultaneous" else "—", "분":r["minutes"], "난이도":r["difficulty"]} for r in db.recent_practices(20)]
     if rows:

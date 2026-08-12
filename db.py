@@ -5,6 +5,7 @@ import os
 import tomllib
 import json
 import ssl
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, quote
 from urllib.request import Request, urlopen
 from contextlib import contextmanager
@@ -59,8 +60,14 @@ class _RestTable:
             ssl_context = ssl.create_default_context(cafile=certifi.where())
         except ImportError:
             ssl_context = ssl.create_default_context()
-        with urlopen(request, timeout=20, context=ssl_context) as response:
-            raw = response.read()
+        try:
+            with urlopen(request, timeout=20, context=ssl_context) as response:
+                raw = response.read()
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", "replace")
+            raise RuntimeError(f"Supabase 요청 오류({exc.code}): {detail[:600]}") from exc
+        except URLError as exc:
+            raise RuntimeError(f"Supabase 연결 실패: {exc.reason}") from exc
         return _Result(json.loads(raw) if raw else ([] if not self.want_single else {}))
 
 
