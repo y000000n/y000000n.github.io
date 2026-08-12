@@ -6,10 +6,12 @@ from html import escape, unescape
 from html.parser import HTMLParser
 import ipaddress
 import json
+import mimetypes
 import random
 import re
 import socket
 import ssl
+import uuid
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
@@ -113,6 +115,9 @@ def selected_record_editor(table, rows, fields, summary_func, key):
             values = {}
             for field, label in fields:
                 current = row.get(field, "")
+                if table == "practices" and row.get("activity_type") == "shadowing" and field == "direction":
+                    values[field] = "없음"
+                    continue
                 if field in ("activity_type", "pair_type", "interpretation_type", "direction"):
                     if field == "activity_type": options, display = list(ACTIVITY_LABELS), ACTIVITY_LABELS
                     elif field == "pair_type": options, display = list(TYPE_LABELS), TYPE_LABELS
@@ -236,17 +241,20 @@ def practice():
                 st.rerun()
     st.divider()
     st.subheader("통역 연습 기록")
+    practice_types = {k:v for k,v in ACTIVITY_LABELS.items() if k != "sight_translation"}
+    activity_label = st.selectbox(
+        "연습 유형",
+        list(practice_types.values()),
+        key="practice_activity_selector",
+        help="섀도잉은 통역 방향을 선택하지 않습니다.",
+    )
+    activity_type = next(k for k, v in practice_types.items() if v == activity_label)
     with st.form("practice", clear_on_submit=True):
-        c1, c2, c3 = st.columns(3)
-        day = c1.date_input("날짜", date.today())
-        practice_types = {k:v for k,v in ACTIVITY_LABELS.items() if k != "sight_translation"}
-        activity_label = c2.selectbox("연습 유형", list(practice_types.values()))
-        activity_type = next(k for k, v in ACTIVITY_LABELS.items() if v == activity_label)
+        day = st.date_input("날짜", date.today())
         if activity_type == "shadowing":
-            c3.text_input("방향", value="해당 없음", disabled=True)
             direction = "없음"
         else:
-            direction = c3.segmented_control("방향", ["KO→JA", "JA→KO"], default="KO→JA")
+            direction = st.segmented_control("방향", ["KO→JA", "JA→KO"], default="KO→JA")
         title = st.text_input("자료 제목 *", placeholder="예: 기후변화 정상회의 연설 또는 시역 기사 제목")
         topic = st.text_input("주제", placeholder="예: 환경·에너지")
         source_url = st.text_input("자료 URL", placeholder="https://…", help="동시통역·순차통역·시역 자료의 원문, 기사 또는 영상 주소를 저장하세요.")
@@ -264,7 +272,7 @@ def practice():
                 if source_url.strip() and not source_url.strip().startswith(("http://", "https://")):
                     st.error("자료 URL은 http:// 또는 https://로 시작해야 합니다.")
                 else:
-                    db.add_practice({"practice_date": day.isoformat(), "activity_type": activity_type, "direction": direction, "title": title.strip(), "topic": topic.strip(), "source_url": source_url.strip() if activity_type in ("simultaneous", "consecutive", "sight_translation") else "", "video_speed": video_speed if activity_type == "simultaneous" else 1.0, "minutes": minutes, "difficulty": difficulty, **errors, "other_notes": notes.strip()})
+                    db.add_practice({"practice_date": day.isoformat(), "activity_type": activity_type, "direction": "없음" if activity_type == "shadowing" else direction, "title": title.strip(), "topic": topic.strip(), "source_url": source_url.strip() if activity_type in ("simultaneous", "consecutive") else "", "video_speed": video_speed if activity_type == "simultaneous" else 1.0, "minutes": minutes, "difficulty": difficulty, **errors, "other_notes": notes.strip()})
                     st.success("연습 기록을 저장했습니다.")
     st.subheader("최근 기록")
     rows = [{"날짜":r["practice_date"], "연습유형":ACTIVITY_LABELS.get(r["activity_type"], r["activity_type"]), "방향":"—" if r["activity_type"]=="shadowing" else r["direction"], "자료":r["title"], "주제":r["topic"], "URL":r.get("source_url", ""), "속도":f"×{r.get('video_speed',1.0):.2f}" if r["activity_type"]=="simultaneous" else "—", "분":r["minutes"], "난이도":r["difficulty"]} for r in db.recent_practices(20)]
@@ -414,6 +422,60 @@ def call_openai_structured(instructions, user_text, schema, name, effort="low"):
     output_text = "".join(content.get("text", "") for item in data.get("output", []) if item.get("type") == "message" for content in item.get("content", []) if content.get("type") == "output_text")
     if not output_text: raise RuntimeError("AI 분석 결과가 비어 있습니다.")
     return json.loads(output_text)
+
+
+def transcribe_interpretation_audio(audio_bytes, filename, content_type, language):
+    """Transcribe one Korean/Japanese interpretation recording without storing audio."""
+    api_key = openai_api_key()
+    if not api_key:
+        raise ValueError("Streamlit Secrets에 OPENAI_API_KEY가 없습니다.")
+    audio_bytes = bytes(audio_bytes or b"")
+    if not audio_bytes:
+        raise ValueError("녹음하거나 업로드한 음성 파일이 비어 있습니다.")
+    if len(audio_bytes) > 24 * 1024 * 1024:
+        raise ValueError("음성 파일은 24MB 이하로 업로드해주세요.")
+    safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", str(filename or "interpretation.wav")) or "interpretation.wav"
+    mime = str(content_type or "").split(";", 1)[0].strip() or mimetypes.guess_type(safe_name)[0] or "application/octet-stream"
+    boundary = "----InterpretationStudy" + uuid.uuid4().hex
+    body = bytearray()
+
+    def add_field(name, value):
+        body.extend(f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n".encode("utf-8"))
+
+    add_field("model", "gpt-4o-mini-transcribe")
+    add_field("response_format", "json")
+    add_field("language", language)
+    prompt = (
+        "통역 연습 녹음입니다. 말한 내용을 요약하거나 문장을 교정하지 말고 가능한 한 그대로 전사하세요. "
+        "음, 어, 그, 그러니까, えー, えっと, あの 같은 머뭇거림, 반복, 자기수정, 미완결 표현도 들리는 대로 남기세요. "
+        "숫자와 고유명사를 정확히 적고 자연스러운 문장부호만 추가하세요."
+    )
+    add_field("prompt", prompt)
+    body.extend(
+        f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{safe_name}\"\r\nContent-Type: {mime}\r\n\r\n".encode("utf-8")
+    )
+    body.extend(audio_bytes)
+    body.extend(f"\r\n--{boundary}--\r\n".encode("utf-8"))
+    request = Request(
+        "https://api.openai.com/v1/audio/transcriptions",
+        data=bytes(body),
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": f"multipart/form-data; boundary={boundary}"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=300, context=ssl.create_default_context(cafile=certifi.where())) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")
+        raise RuntimeError(f"OpenAI STT 오류({exc.code}): {detail[:400]}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"OpenAI STT 연결 실패: {exc.reason}") from exc
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("음성 인식 결과를 읽지 못했습니다.") from exc
+    transcript = str(result.get("text", "")).strip()
+    if not transcript:
+        raise RuntimeError("음성에서 변환된 텍스트를 찾지 못했습니다.")
+    return transcript
 
 
 def analyze_scripts_ai(source, interpreted, direction, interpretation_type):
@@ -1263,29 +1325,60 @@ def tts_page():
 def script_feedback():
     hero("스크립트 피드백", "AI가 원문과 실제 통역문을 문장별로 정렬해 누락·오역·표현·유창성을 분석합니다.")
     if not openai_api_key():
-        st.warning("AI 분석을 사용하려면 Streamlit Secrets에 OPENAI_API_KEY를 등록해야 합니다.")
-    with st.form("script_feedback"):
-        a,b,c = st.columns(3)
-        feedback_date = a.date_input("날짜", date.today())
-        interpretation_type = b.selectbox("통역 유형", ["동시통역", "순차통역"])
-        direction = c.segmented_control("방향", ["KO→JA", "JA→KO"], default="KO→JA")
-        title = st.text_input("자료 제목 *")
-        left,right = st.columns(2)
-        source_script = left.text_area("통역 대상 스크립트 *", height=320)
-        interpreted_script = right.text_area("실제 통역 스크립트 *", height=320)
-        if st.form_submit_button("분석하고 저장", type="primary", use_container_width=True):
-            if not title.strip() or not source_script.strip() or not interpreted_script.strip():
-                st.error("제목과 두 스크립트를 모두 입력해주세요.")
+        st.warning("AI 분석과 음성 인식을 사용하려면 Streamlit Secrets에 OPENAI_API_KEY를 등록해야 합니다.")
+    a,b,c = st.columns(3)
+    feedback_date = a.date_input("날짜", date.today(), key="script_feedback_date")
+    interpretation_type = b.selectbox("통역 유형", ["동시통역", "순차통역"], key="script_feedback_type")
+    direction = c.segmented_control("방향", ["KO→JA", "JA→KO"], default="KO→JA", key="script_feedback_direction")
+    title = st.text_input("자료 제목 *", key="script_feedback_title")
+
+    with st.expander("🎙️ 실제 통역 음성을 텍스트로 변환", expanded=False):
+        st.caption("마이크로 바로 녹음하거나 기존 음성 파일을 올린 뒤 변환하세요. 음성은 저장하지 않으며 변환된 텍스트만 입력란에 반영됩니다.")
+        record_col, upload_col = st.columns(2)
+        recorded_audio = record_col.audio_input("마이크로 녹음", key="script_feedback_recording")
+        uploaded_audio = upload_col.file_uploader(
+            "음성 파일 업로드",
+            type=["mp3", "mp4", "mpeg", "mpga", "m4a", "wav", "webm"],
+            key="script_feedback_audio_upload",
+            help="24MB 이하의 MP3, MP4, MPEG, MPGA, M4A, WAV, WEBM 파일",
+        )
+        audio_source = uploaded_audio or recorded_audio
+        if uploaded_audio is not None and recorded_audio is not None:
+            st.caption("두 음성이 모두 있으면 업로드한 파일을 변환합니다.")
+        if st.button("음성을 텍스트로 변환", type="secondary", use_container_width=True, key="script_feedback_transcribe"):
+            if audio_source is None:
+                st.error("먼저 마이크로 녹음하거나 음성 파일을 업로드해주세요.")
             else:
                 try:
-                    with st.spinner("문장별 의미와 표현을 분석하고 있습니다…"):
-                        result = analyze_scripts_ai(source_script.strip(), interpreted_script.strip(), direction, interpretation_type)
-                    saved = json.dumps(result, ensure_ascii=False)
-                    db.add_script_feedback({"feedback_date":feedback_date.isoformat(), "interpretation_type":interpretation_type, "direction":direction, "title":title.strip(), "source_script":source_script.strip(), "interpreted_script":interpreted_script.strip(), "feedback":saved})
-                    st.session_state["latest_script_feedback"] = result
-                    st.success("문장별 AI 분석 결과를 저장했습니다.")
+                    target_language = "ja" if direction == "KO→JA" else "ko"
+                    with st.spinner("머뭇거림과 반복을 포함해 실제 통역을 받아쓰고 있습니다…"):
+                        transcript = transcribe_interpretation_audio(
+                            audio_source.getvalue(),
+                            getattr(audio_source, "name", "interpretation.wav"),
+                            getattr(audio_source, "type", "audio/wav"),
+                            target_language,
+                        )
+                    st.session_state["script_feedback_interpreted"] = transcript
+                    st.success("음성을 텍스트로 변환했습니다. 아래에서 오인식 부분을 확인·수정한 뒤 분석하세요.")
                 except Exception as exc:
                     st.error(str(exc))
+
+    left,right = st.columns(2)
+    source_script = left.text_area("통역 대상 스크립트 *", height=320, key="script_feedback_source")
+    interpreted_script = right.text_area("실제 통역 스크립트 *", height=320, key="script_feedback_interpreted")
+    if st.button("분석하고 저장", type="primary", use_container_width=True, key="script_feedback_analyze"):
+        if not title.strip() or not source_script.strip() or not interpreted_script.strip():
+            st.error("제목과 두 스크립트를 모두 입력해주세요.")
+        else:
+            try:
+                with st.spinner("문장별 의미와 표현을 분석하고 있습니다…"):
+                    result = analyze_scripts_ai(source_script.strip(), interpreted_script.strip(), direction, interpretation_type)
+                saved = json.dumps(result, ensure_ascii=False)
+                db.add_script_feedback({"feedback_date":feedback_date.isoformat(), "interpretation_type":interpretation_type, "direction":direction, "title":title.strip(), "source_script":source_script.strip(), "interpreted_script":interpreted_script.strip(), "feedback":saved})
+                st.session_state["latest_script_feedback"] = result
+                st.success("문장별 AI 분석 결과를 저장했습니다.")
+            except Exception as exc:
+                st.error(str(exc))
     if st.session_state.get("latest_script_feedback"):
         st.subheader("이번 분석 결과"); show_script_analysis(st.session_state["latest_script_feedback"])
     st.subheader("저장된 피드백")
