@@ -157,6 +157,7 @@ def init_db(db_path: Path | str = DB_PATH) -> None:
                 pair_type TEXT NOT NULL CHECK(pair_type IN ('collocation','term','pattern','other')),
                 source TEXT DEFAULT '',
                 notes TEXT DEFAULT '',
+                important INTEGER NOT NULL DEFAULT 0 CHECK(important IN (0,1)),
                 mastery INTEGER NOT NULL DEFAULT 1 CHECK(mastery BETWEEN 1 AND 5),
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 last_reviewed_at TEXT,
@@ -223,6 +224,9 @@ def init_db(db_path: Path | str = DB_PATH) -> None:
             conn.execute("ALTER TABLE practices ADD COLUMN source_url TEXT DEFAULT ''")
         if "video_speed" not in practice_columns:
             conn.execute("ALTER TABLE practices ADD COLUMN video_speed REAL NOT NULL DEFAULT 1.0")
+        pair_columns = {row["name"] for row in conn.execute("PRAGMA table_info(language_pairs)")}
+        if "important" not in pair_columns:
+            conn.execute("ALTER TABLE language_pairs ADD COLUMN important INTEGER NOT NULL DEFAULT 0")
         material_columns = {row["name"] for row in conn.execute("PRAGMA table_info(study_materials)")}
         if "language_direction" not in material_columns:
             conn.execute("ALTER TABLE study_materials ADD COLUMN language_direction TEXT NOT NULL DEFAULT '한일'")
@@ -290,12 +294,12 @@ def add_practice(values: dict, db_path: Path | str = DB_PATH) -> int:
 def add_pair(values: dict, db_path: Path | str = DB_PATH) -> int:
     remote = _remote_client()
     if remote:
-        payload = {"korean": values["korean"], "japanese": values["japanese"], "pair_type": values["pair_type"], "source": values.get("source", ""), "notes": values.get("notes", ""), "mastery": values.get("mastery", 1)}
+        payload = {"korean": values["korean"], "japanese": values["japanese"], "pair_type": values.get("pair_type", "other"), "source": values.get("source", ""), "notes": values.get("notes", ""), "important": bool(values.get("important", False)), "mastery": values.get("mastery", 1)}
         return remote.table("language_pairs").insert(payload).execute().data[0]["id"]
     return execute(
-        "INSERT INTO language_pairs(korean,japanese,pair_type,source,notes,mastery) VALUES(?,?,?,?,?,?)",
-        (values["korean"], values["japanese"], values["pair_type"], values.get("source", ""),
-         values.get("notes", ""), values.get("mastery", 1)), db_path,
+        "INSERT INTO language_pairs(korean,japanese,pair_type,source,notes,important,mastery) VALUES(?,?,?,?,?,?,?)",
+        (values["korean"], values["japanese"], values.get("pair_type", "other"), values.get("source", ""),
+         values.get("notes", ""), int(bool(values.get("important", False))), values.get("mastery", 1)), db_path,
     )
 
 
@@ -398,10 +402,10 @@ def recent_practices(limit=20):
     return query("SELECT * FROM practices ORDER BY practice_date DESC,id DESC LIMIT ?", (limit,))
 
 
-def all_pairs():
+def all_pairs(db_path: Path | str = DB_PATH):
     remote = _remote_client()
     if remote: return remote.table("language_pairs").select("*").order("created_at").execute().data
-    return query("SELECT * FROM language_pairs ORDER BY created_at")
+    return query("SELECT * FROM language_pairs ORDER BY created_at", db_path=db_path)
 
 
 def pairs_created_since(start: str, db_path: Path | str = DB_PATH) -> int:
@@ -411,12 +415,13 @@ def pairs_created_since(start: str, db_path: Path | str = DB_PATH) -> int:
     return int(query("SELECT COUNT(*) AS count FROM language_pairs WHERE created_at>=?", (start,), db_path)[0]["count"])
 
 
-def find_pairs(term="", pair_type=None, mastery=None):
-    rows = all_pairs()
+def find_pairs(term="", pair_type=None, mastery=None, important_only=False, db_path: Path | str = DB_PATH):
+    rows = all_pairs(db_path)
     needle = term.casefold()
     rows = [r for r in rows if needle in (r["korean"] + r["japanese"] + (r.get("source") or "")).casefold()]
     if pair_type: rows = [r for r in rows if r["pair_type"] == pair_type]
     if mastery: rows = [r for r in rows if r["mastery"] == mastery]
+    if important_only: rows = [r for r in rows if bool(r.get("important", False))]
     return sorted(rows, key=lambda r: r["id"], reverse=True)
 
 
@@ -481,7 +486,7 @@ def sight_translation_events(start: str, end: str | None = None, db_path: Path |
 
 EDITABLE_COLUMNS = {
     "practices": {"practice_date","activity_type","direction","title","topic","source_url","video_speed","minutes","difficulty","omission","number_omission","logic_error","expression_block","unnatural_expression","other_notes"},
-    "language_pairs": {"korean","japanese","pair_type","source","notes","mastery"},
+    "language_pairs": {"korean","japanese","pair_type","source","notes","important","mastery"},
     "study_notes": {"note_date","title","content","tags"},
     "script_feedbacks": {"feedback_date","interpretation_type","direction","title","source_script","interpreted_script","feedback"},
     "study_materials": {"title","content_html","language_direction","interpretation_mode"},

@@ -128,6 +128,7 @@ def selected_record_editor(table, rows, fields, summary_func, key):
                 elif field in ("minutes","difficulty","omission","number_omission","logic_error","expression_block","unnatural_expression","mastery"):
                     values[field] = st.number_input(label, min_value=0 if field not in ("minutes","difficulty","mastery") else 1, value=int(current), key=f"{key}_{editing_id}_{field}")
                 elif field == "video_speed": values[field] = st.select_slider(label, options=[round(.7+i*.05,2) for i in range(7)], value=float(current or 1.0), key=f"{key}_{editing_id}_{field}")
+                elif field == "important": values[field] = st.checkbox(label, value=bool(current), key=f"{key}_{editing_id}_{field}")
                 elif "script" in field or field in ("content","feedback","other_notes","notes"): values[field] = st.text_area(label, value=str(current or ""), height=140, key=f"{key}_{editing_id}_{field}")
                 else: values[field] = st.text_input(label, value=str(current or ""), key=f"{key}_{editing_id}_{field}")
             save, cancel = st.columns(2)
@@ -302,30 +303,35 @@ def language_pairs():
             a, b = st.columns(2)
             korean = a.text_area("한국어 *", placeholder="정책을 적극적으로 추진하다")
             japanese = b.text_area("일본어 *", placeholder="政策を積極的に推進する")
-            c1, c2, c3 = st.columns(3)
-            pair_type_label = c1.selectbox("유형", list(TYPE_LABELS.values()))
-            source = c2.text_input("출처")
-            mastery = c3.slider("숙지도", 1, 5, 1)
+            c1, c2, c3 = st.columns([2,1,1])
+            source = c1.text_input("출처")
+            mastery = c2.slider("숙지도", 1, 5, 1)
+            important = c3.checkbox("⭐ 중요 표현")
             notes = st.text_area("메모")
             if st.form_submit_button("언어쌍 저장", type="primary"):
                 if not korean.strip() or not japanese.strip(): st.error("한국어와 일본어를 모두 입력해주세요.")
                 else:
-                    pair_type = next(k for k, v in TYPE_LABELS.items() if v == pair_type_label)
-                    db.add_pair({"korean": korean.strip(), "japanese": japanese.strip(), "pair_type": pair_type, "source": source.strip(), "notes": notes.strip(), "mastery": mastery})
-                    st.success("언어쌍을 저장했습니다.")
+                    try:
+                        db.add_pair({"korean": korean.strip(), "japanese": japanese.strip(), "source": source.strip(), "notes": notes.strip(), "important": important, "mastery": mastery})
+                        st.success("언어쌍을 저장했습니다.")
+                    except Exception as exc:
+                        detail = str(exc)
+                        if "important" in detail.lower():
+                            st.error("Supabase에 중요 표시 열을 추가해야 합니다. SQL Editor에서 `supabase_update_v10.sql`을 한 번 실행한 뒤 다시 저장해주세요.")
+                        else:
+                            st.error(detail)
     st.subheader("언어쌍 검색")
     c1, c2, c3 = st.columns([2,1,1])
     term = c1.text_input("검색", placeholder="한국어·일본어·출처 검색", label_visibility="collapsed")
-    kind = c2.selectbox("유형 필터", ["전체"] + list(TYPE_LABELS.values()), label_visibility="collapsed")
+    importance_filter = c2.selectbox("중요도 필터", ["전체 표현", "⭐ 중요 표현만"], label_visibility="collapsed")
     mastery_filter = c3.selectbox("숙지도 필터", ["전체"] + [str(i) for i in range(1,6)], label_visibility="collapsed")
-    pair_type_filter = next((k for k,v in TYPE_LABELS.items() if v==kind), None)
-    rows = db.find_pairs(term, pair_type_filter, None if mastery_filter == "전체" else int(mastery_filter))
+    rows = db.find_pairs(term, mastery=None if mastery_filter == "전체" else int(mastery_filter), important_only=importance_filter == "⭐ 중요 표현만")
     if rows:
-        shown = [{"한국어":r["korean"], "일본어":r["japanese"], "유형":TYPE_LABELS[r["pair_type"]], "출처":r["source"], "숙지도":"★"*r["mastery"], "복습":r["review_count"]} for r in rows]
+        shown = [{"중요":"⭐" if r.get("important") else "", "한국어":r["korean"], "일본어":r["japanese"], "출처":r["source"], "숙지도":"★"*r["mastery"], "복습":r["review_count"]} for r in rows]
         st.dataframe(shown, use_container_width=True, hide_index=True)
         st.markdown("#### 기록 수정")
-        fields = [("korean","한국어"),("japanese","일본어"),("pair_type","유형"),("source","출처"),("notes","메모"),("mastery","숙지도")]
-        selected_record_editor("language_pairs", rows, fields, lambda r: f"{r['korean']} → {r['japanese']}", "pair")
+        fields = [("important","⭐ 중요 표현"),("korean","한국어"),("japanese","일본어"),("source","출처"),("notes","메모"),("mastery","숙지도")]
+        selected_record_editor("language_pairs", rows, fields, lambda r: f"{'⭐ ' if r.get('important') else ''}{r['korean']} → {r['japanese']}", "pair")
     else: st.info("조건에 맞는 언어쌍이 없습니다.")
 
 
@@ -1564,7 +1570,7 @@ def records_manager():
     hero("기록 수정", "저장한 데이터를 표에서 고친 뒤 변경사항을 저장하세요.")
     specs = [
         ("연습", "practices", "id", {"practice_date":"날짜","activity_type":"유형","direction":"방향","title":"자료 제목","topic":"주제","source_url":"URL","video_speed":"속도","minutes":"분","difficulty":"난이도","omission":"내용 누락","number_omission":"숫자 누락","logic_error":"논리 오류","expression_block":"표현 막힘","unnatural_expression":"부자연스러운 표현","other_notes":"메모"}),
-        ("언어쌍", "language_pairs", "id", {"korean":"한국어","japanese":"일본어","pair_type":"유형","source":"출처","notes":"메모","mastery":"숙지도"}),
+        ("언어쌍", "language_pairs", "id", {"important":"중요","korean":"한국어","japanese":"일본어","source":"출처","notes":"메모","mastery":"숙지도"}),
         ("공부 메모", "study_notes", "id", {"note_date":"날짜","title":"제목","content":"내용","tags":"태그"}),
         ("스크립트 피드백", "script_feedbacks", "id", {"feedback_date":"날짜","interpretation_type":"통역 유형","direction":"방향","title":"제목","source_script":"대상 스크립트","interpreted_script":"실제 통역 스크립트","feedback":"피드백"}),
         ("목표 설정", "settings", "key", {"value":"설정값"}),
@@ -1582,8 +1588,7 @@ def records_manager():
                 config.update({"유형":st.column_config.SelectboxColumn("유형", options=list(ACTIVITY_LABELS.values()), required=True), "방향":st.column_config.SelectboxColumn("방향", options=["KO→JA","JA→KO"], required=True), "속도":st.column_config.NumberColumn("속도", min_value=.7, max_value=1.0, step=.05)})
                 frame["유형"] = frame["유형"].map(lambda x: ACTIVITY_LABELS.get(x,x))
             elif table == "language_pairs":
-                config.update({"유형":st.column_config.SelectboxColumn("유형", options=list(TYPE_LABELS.values()), required=True), "숙지도":st.column_config.NumberColumn("숙지도", min_value=1, max_value=5, step=1)})
-                frame["유형"] = frame["유형"].map(lambda x: TYPE_LABELS.get(x,x))
+                config.update({"중요":st.column_config.CheckboxColumn("중요"), "숙지도":st.column_config.NumberColumn("숙지도", min_value=1, max_value=5, step=1)})
             elif table == "script_feedbacks":
                 config.update({"통역 유형":st.column_config.SelectboxColumn("통역 유형", options=["동시통역","순차통역"]), "방향":st.column_config.SelectboxColumn("방향", options=["KO→JA","JA→KO"])})
             edited = st.data_editor(frame, use_container_width=True, hide_index=True, num_rows="fixed", column_config=config, key=f"editor_{table}")
@@ -1592,7 +1597,6 @@ def records_manager():
                 for record in edited.to_dict("records"):
                     values = {reverse[k]: v for k,v in record.items() if k in reverse}
                     if table == "practices": values["activity_type"] = next((k for k,v in ACTIVITY_LABELS.items() if v==values["activity_type"]), values["activity_type"])
-                    if table == "language_pairs": values["pair_type"] = next((k for k,v in TYPE_LABELS.items() if v==values["pair_type"]), values["pair_type"])
                     db.update_record(table, record[id_column], values)
                 st.success(f"{label} 기록을 수정했습니다.")
                 st.rerun()
