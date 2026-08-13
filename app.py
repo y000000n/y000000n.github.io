@@ -134,7 +134,32 @@ def selected_record_editor(table, rows, fields, summary_func, key):
             save, cancel = st.columns(2)
             if save.form_submit_button("변경사항 저장", type="primary", use_container_width=True):
                 if table == "practices" and values.get("activity_type") == "shadowing": values["direction"] = "없음"
-                db.update_record(table, row["id"], values); st.session_state[state_key] = None; st.rerun()
+                changed = {}
+                numeric_fields = {"minutes","difficulty","omission","number_omission","logic_error","expression_block","unnatural_expression","mastery","video_speed"}
+                for field, value in values.items():
+                    original = row.get(field)
+                    if field == "important":
+                        differs = bool(value) != bool(original)
+                    elif field in numeric_fields:
+                        differs = float(value or 0) != float(original or 0)
+                    else:
+                        differs = str(value or "") != str(original or "")
+                    if differs:
+                        changed[field] = value
+                if not changed:
+                    st.info("변경된 내용이 없습니다.")
+                else:
+                    try:
+                        db.update_record(table, row["id"], changed)
+                        st.session_state[state_key] = None
+                        st.success("수정했습니다.")
+                        st.rerun()
+                    except Exception as exc:
+                        detail = str(exc)
+                        if table == "language_pairs" and "important" in changed and any(word in detail.lower() for word in ("important", "column", "schema", "cache")):
+                            st.error("Supabase의 중요 표시 열이 아직 REST API에 반영되지 않았습니다. SQL Editor에서 최신 `supabase_update_v10.sql`을 다시 실행한 뒤 앱을 새로고침해주세요.")
+                        else:
+                            st.error(detail)
             if cancel.form_submit_button("취소", use_container_width=True): st.session_state[state_key] = None; st.rerun()
 
 
@@ -848,8 +873,8 @@ def _normalize_extracted_term(value):
     return re.sub(r"[\s·・.ㆍ\-_/（）()「」『』\[\]]+", "", str(value or "")).casefold()
 
 
-def refine_extracted_terms(terms):
-    """Remove deterministic exclusions, generic words, and duplicated person components."""
+def refine_extracted_terms(terms, source_text=""):
+    """Apply exclusions while preserving organizations named inside person-title phrases."""
     excluded = {
         "청와대", "青瓦台", "행정안전부", "행안부", "行政安全部", "기획재정부", "기재부", "企画財政部",
         "산업통상부", "산업통상자원부", "산자부", "産業通商資源部", "후생성", "厚生省",
@@ -886,10 +911,19 @@ def refine_extracted_terms(terms):
         for item in kept if item.get("subtype") == "인명·소속·직책"
     ]
     refined = []
+    seen = set()
     for item in kept:
         normalized = _normalize_extracted_term(item.get("term", ""))
-        if item.get("subtype") != "인명·소속·직책" and any(normalized != whole and normalized in whole for whole, _ in combined):
+        # Only suppress a separately emitted bare person/title. An organization,
+        # department, or team remains independently useful even when it also
+        # appears inside a combined person+affiliation+title expression.
+        if item.get("subtype") in {"인명", "직책"} and any(normalized != whole and normalized in whole for whole, _ in combined):
             continue
+        if normalized in seen:
+            continue
+        if source_text and normalized not in _normalize_extracted_term(source_text):
+            continue
+        seen.add(normalized)
         refined.append(item)
     return refined
 
@@ -908,7 +942,8 @@ def extract_terms_ai(text):
 - 법률·정책·위원회 등의 전체 정식 명칭은 추출할 수 있지만, 그 명칭에서 '특별법', '위원회', '정책' 같은 일반 부분만 떼어 별도 용어로 만들지 않는다.
 
 2. 이름 결합:
-- 위 제외 대상이 아닌 인명에 소속이나 직책이 함께 나오면 반드시 하나의 term으로 합친다. 인명, 소속, 직책을 별도 항목으로 중복 출력하지 않는다.
+- 위 제외 대상이 아닌 모든 인명은 반드시 추출한다. 한 문장씩 끝까지 훑어 사람 이름을 하나도 빠뜨리지 않는다.
+- 위 제외 대상이 아닌 인명에 소속이나 직책이 함께 나오면 반드시 하나의 term으로 합친다. 인명과 직책을 별도 항목으로 중복 출력하지 않는다.
 - 원문에 나온 정보만 합치며 원문에 없는 소속이나 직책을 추정하지 않는다.
 - 예: '삼성전자 홍길동 팀장'은 그 전체를 하나의 '인명·소속·직책'으로 출력한다.
 - 예: '야마다 케이스케 한일협회 회장'은 그 전체를 하나의 '인명·소속·직책'으로 출력한다.
@@ -916,7 +951,8 @@ def extract_terms_ai(text):
 - 이름만 나오면 '인명', 직책만 준비 가치가 있을 때는 '직책'으로 출력한다.
 
 3. 반드시 포함:
-- 정부부처가 아닌 위원회, 기업, 노동조합, 협회, 단체와 기타 조직의 고유명은 반드시 추출한다. 예: '전교조'는 '위원회·조직명'으로 포함한다.
+- 정부부처가 아닌 위원회, 기업, 노동조합, 협회, 재단, 연구소, 대학, 정당, 시민단체, 국제기구, 스포츠팀과 기타 조직의 고유명은 반드시 추출한다. 예: '전교조'는 '위원회·조직명'으로 포함한다.
+- 조직명이 인명·소속·직책 결합 term 안에 포함되어 있어도, 그 조직명 자체를 별도의 '위원회·조직명' 또는 '기관·기업명' 항목으로 반드시 함께 출력한다. 이는 중복이 아니다. 예: '야마다 케이스케 한일협회 회장'과 '한일협회'를 모두 출력한다.
 - 회사·기관의 부서명과 팀명, 법률명, 협정명, 정책명, 사업명, 기술명, 그리고 '생산가능인구'처럼 정확한 개념 준비가 필요한 전문용어를 추출한다.
 - 각 후보는 다음 중 하나를 만족해야 한다: (a) 그 표현 전체가 특정 사람·조직·법률·정책·사업을 고유하게 식별한다. (b) 일반어의 조합만으로 뜻을 바로 알기 어렵고 별도의 전문 정의나 정형 번역을 준비해야 한다.
 - 위 조건을 만족하지 않으면 중요한 문맥에 등장해도 제외한다. 추출할 항목이 없으면 terms를 빈 배열로 반환한다.
@@ -929,9 +965,23 @@ def extract_terms_ai(text):
 - context에는 그 기사에서의 짧은 의미나 역할을 한국어로 적는다.
 - position에는 원문에서 처음 등장한 문자 위치에 가까운 정수를 넣는다.
 - 근거가 없는 용어는 추가하지 않는다."""
-    result = call_openai_structured(instructions, text, schema, "terminology_extraction", "low")
-    result["terms"] = refine_extracted_terms(result.get("terms", []))
-    return result
+    initial = call_openai_structured(instructions, text, schema, "terminology_extraction", "medium")
+    audit_instructions = """당신은 고유명사 추출 결과를 검수하는 최종 감사자다. 제공된 원문을 첫 문장부터 마지막 문장까지 다시 읽고, 기존 추출 결과를 그대로 믿지 말고 완전한 최종 목록을 반환한다.
+
+최우선 감사 항목:
+1. 제외 대상이 아닌 사람 이름이 하나라도 누락되면 반드시 추가한다.
+2. 사람 이름과 소속·직책이 같은 문맥에 함께 나오면 원문에 나타난 전체 표현을 하나의 '인명·소속·직책' term으로 만든다. 분리된 인명과 직책 항목은 제거한다.
+3. 정부부처·대통령실은 제외하지만, 그 밖의 특정 기업·위원회·협회·노조·재단·연구소·대학·정당·단체·국제기구·팀 이름은 반드시 포함한다.
+4. 조직명이 인명·소속·직책 결합 표현 안에 들어 있어도 조직명 자체를 별도 항목으로 유지한다.
+5. '정부', '위원회', '기업' 같은 일반명사만 단독으로 추출하지 않는다. 정식 고유명칭만 포함한다.
+6. 한국·일본 대통령·총리와 이름 없는 정부부처+장관, 기초 시사용어는 기존 제외 규칙대로 제외한다.
+7. term은 원문에 실제로 존재하는 연속 문자열을 그대로 복사한다. 번역·분류·문맥·최초 위치를 완성한다.
+
+출력은 누락과 잘못된 분리를 모두 바로잡은 완전한 최종 목록이어야 한다."""
+    audit_input = f"[원문]\n{text}\n\n[1차 추출 결과]\n{json.dumps(initial, ensure_ascii=False)}"
+    audited = call_openai_structured(audit_instructions, audit_input, schema, "terminology_extraction_audit", "medium")
+    audited["terms"] = refine_extracted_terms(audited.get("terms", []), text)
+    return audited
 
 
 def terminology_extraction():
@@ -948,7 +998,7 @@ def terminology_extraction():
         if not article_url.strip() and not text.strip(): st.error("신문기사 URL 또는 분석할 텍스트를 입력해주세요.")
         else:
             try:
-                with st.spinner("고유명사와 전문용어를 추출하고 있습니다…"):
+                with st.spinner("1차 추출 후 인명·직책·조직명 누락을 다시 검수하고 있습니다…"):
                     article = fetch_article_text(article_url.strip()) if article_url.strip() else None
                     analysis_text = article["text"] if article else text.strip()
                     result = extract_terms_ai(analysis_text)
