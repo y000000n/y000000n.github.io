@@ -15,6 +15,18 @@ from pathlib import Path
 DB_PATH = Path(__file__).with_name("interpretation_study.db")
 _SUPABASE = None
 _REMOTE_CHECKED = False
+_SSL_CONTEXT = None
+
+
+def _ssl_context():
+    global _SSL_CONTEXT
+    if _SSL_CONTEXT is None:
+        try:
+            import certifi
+            _SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
+        except ImportError:
+            _SSL_CONTEXT = ssl.create_default_context()
+    return _SSL_CONTEXT
 
 
 def _normalize_supabase_url(value: str) -> str:
@@ -56,12 +68,7 @@ class _RestTable:
         headers = {"apikey": self.client.key, "Authorization": f"Bearer {self.client.key}", "Content-Type": "application/json", **self.headers}
         request = Request(url, data=body, headers=headers, method=self.method)
         try:
-            import certifi
-            ssl_context = ssl.create_default_context(cafile=certifi.where())
-        except ImportError:
-            ssl_context = ssl.create_default_context()
-        try:
-            with urlopen(request, timeout=20, context=ssl_context) as response:
+            with urlopen(request, timeout=20, context=_ssl_context()) as response:
                 raw = response.read()
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", "replace")
@@ -385,14 +392,23 @@ def all_practices():
 
 
 def recent_practices(limit=20):
-    rows = all_practices()
-    return sorted(rows, key=lambda r: (r["practice_date"], r["id"]), reverse=True)[:limit]
+    remote = _remote_client()
+    if remote:
+        return remote.table("practices").select("*").order("practice_date", desc=True).limit(limit).execute().data
+    return query("SELECT * FROM practices ORDER BY practice_date DESC,id DESC LIMIT ?", (limit,))
 
 
 def all_pairs():
     remote = _remote_client()
     if remote: return remote.table("language_pairs").select("*").order("created_at").execute().data
     return query("SELECT * FROM language_pairs ORDER BY created_at")
+
+
+def pairs_created_since(start: str, db_path: Path | str = DB_PATH) -> int:
+    remote = _remote_client()
+    if remote:
+        return len(remote.table("language_pairs").select("id").gte("created_at", start).execute().data)
+    return int(query("SELECT COUNT(*) AS count FROM language_pairs WHERE created_at>=?", (start,), db_path)[0]["count"])
 
 
 def find_pairs(term="", pair_type=None, mastery=None):
@@ -410,15 +426,26 @@ def all_notes():
     return query("SELECT * FROM study_notes ORDER BY note_date DESC,id DESC")
 
 
+def recent_notes(limit=3, db_path: Path | str = DB_PATH):
+    remote = _remote_client()
+    if remote:
+        return remote.table("study_notes").select("*").order("note_date", desc=True).limit(limit).execute().data
+    return query("SELECT * FROM study_notes ORDER BY note_date DESC,id DESC LIMIT ?", (limit,), db_path)
+
+
 def find_notes(term=""):
     needle = term.casefold()
     return [r for r in all_notes() if needle in (r["title"] + r["content"] + (r.get("tags") or "")).casefold()]
 
 
-def all_script_feedbacks():
+def all_script_feedbacks(limit=None):
     remote = _remote_client()
-    if remote: return remote.table("script_feedbacks").select("*").order("id", desc=True).execute().data
-    return query("SELECT * FROM script_feedbacks ORDER BY feedback_date DESC,id DESC")
+    if remote:
+        query_builder = remote.table("script_feedbacks").select("*").order("id", desc=True)
+        if limit is not None: query_builder = query_builder.limit(limit)
+        return query_builder.execute().data
+    sql = "SELECT * FROM script_feedbacks ORDER BY feedback_date DESC,id DESC"
+    return query(sql + (" LIMIT ?" if limit is not None else ""), (limit,) if limit is not None else ())
 
 
 def add_script_review(title: str, script_text: str, db_path: Path | str = DB_PATH) -> int:

@@ -145,9 +145,11 @@ def dashboard():
     st.markdown(f'<div class="dday-panel"><div class="dday-number">{dday_text}</div></div>', unsafe_allow_html=True)
     today = date.today().isoformat()
     week = db.week_start()
-    week_practices = db.practices_between(week)
+    week_days = [date.fromisoformat(week) + timedelta(days=i) for i in range(7)]
+    week_end = week_days[-1].isoformat()
+    week_practices = db.practices_between(week, week_end)
     mins = {direction: sum(r["minutes"] for r in week_practices if r["activity_type"] != "shadowing" and r["direction"] == direction) for direction in ("KO→JA", "JA→KO")}
-    pair_count = sum(1 for r in db.all_pairs() if str(r["created_at"])[:10] >= week)
+    pair_count = db.pairs_created_since(week)
     total_goal = int(settings["weekly_ko_ja_goal"]) + int(settings["weekly_ja_ko_goal"])
     total_mins = sum(mins.values())
     c1, c2, c3 = st.columns(3)
@@ -162,7 +164,7 @@ def dashboard():
         ("consecutive", "JA→KO", "JA→KO 순차통역"),
         ("shadowing", None, "섀도잉"),
     ]
-    today_raw = db.practices_between(today, today)
+    today_raw = [r for r in week_practices if str(r["practice_date"])[:10] == today]
     def routine_minutes(rows, activity, direction):
         return sum(r["minutes"] for r in rows if r["activity_type"] == activity and (direction is None or r["direction"] == direction))
     cols = st.columns(5)
@@ -171,7 +173,8 @@ def dashboard():
         col.markdown(f"### {'✅' if current >= 10 else '⬜'} {label}")
         col.caption(f"오늘 {current}분 / 기본 10분")
         col.progress(min(current / 10, 1.0))
-    today_sight_events = db.sight_translation_events(today, today)
+    sight_events = db.sight_translation_events(week, week_end)
+    today_sight_events = [e for e in sight_events if str(e["practice_date"])[:10] == today]
     sight_cols = st.columns(2)
     for col, direction in zip(sight_cols, ("KO→JA", "JA→KO")):
         sight_count = sum(1 for e in today_sight_events if e["direction"] == direction)
@@ -179,8 +182,7 @@ def dashboard():
         col.caption(f"오늘 {sight_count}회 / 기본 7회")
         col.progress(min(sight_count / 7, 1.0))
     st.subheader("이번 주 루틴 실천표")
-    week_days = [date.fromisoformat(week) + timedelta(days=i) for i in range(7)]
-    weekly_raw = db.practices_between(week_days[0].isoformat(), week_days[-1].isoformat())
+    weekly_raw = week_practices
     table = []
     for activity, direction, label in routines:
         row = {"기본 루틴": label}
@@ -189,7 +191,6 @@ def dashboard():
             amount = routine_minutes(day_rows, activity, direction)
             row[f"{day.strftime('%m/%d')}\n{'월화수목금토일'[day.weekday()]}"] = "✅" if amount >= 10 else (f"{amount}분" if amount else "—")
         table.append(row)
-    sight_events = db.sight_translation_events(week_days[0].isoformat(), week_days[-1].isoformat())
     for direction in ("KO→JA", "JA→KO"):
         row = {"기본 루틴": f"{direction} 시역(회)"}
         for day in week_days:
@@ -198,7 +199,7 @@ def dashboard():
         table.append(row)
     st.dataframe(table, use_container_width=True, hide_index=True)
     st.subheader("최근 공부 메모")
-    recent_notes = db.all_notes()[:3]
+    recent_notes = db.recent_notes(3)
     if recent_notes:
         for note in recent_notes:
             with st.container(border=True):
@@ -1325,6 +1326,10 @@ def tts_page():
             st.write(st.session_state.get("tts_converted_text", text.strip()))
         with st.expander("의미 구절 나눔 확인"):
             st.write(" / ".join(st.session_state.get("tts_segment_texts", [])))
+        if st.button("생성 음성 메모리 비우기", key="tts_release_audio", help="현재 생성된 음성을 삭제해 앱 메모리를 확보합니다. 원문 입력은 유지됩니다."):
+            for key in ("tts_audio", "tts_signature", "tts_target_seconds", "tts_character_count", "tts_converted_text", "tts_segment_texts", "tts_segment_count"):
+                st.session_state.pop(key, None)
+            st.rerun()
     elif audio:
         st.info("언어나 텍스트가 변경되었습니다. 새 내용으로 음성을 다시 생성해주세요.")
 
@@ -1333,6 +1338,8 @@ def script_feedback():
     hero("스크립트 피드백", "AI가 원문과 실제 통역문을 문장별로 정렬해 누락·오역·표현·유창성을 분석합니다.")
     if not openai_api_key():
         st.warning("AI 분석과 음성 인식을 사용하려면 Streamlit Secrets에 OPENAI_API_KEY를 등록해야 합니다.")
+    if st.session_state.pop("script_feedback_transcribed_notice", False):
+        st.success("음성을 텍스트로 변환했습니다. 오인식 부분을 확인·수정한 뒤 분석하세요. 원본 음성은 메모리에서 해제했습니다.")
     a,b,c = st.columns(3)
     feedback_date = a.date_input("날짜", date.today(), key="script_feedback_date")
     interpretation_type = b.selectbox("통역 유형", ["동시통역", "순차통역"], key="script_feedback_type")
@@ -1341,12 +1348,17 @@ def script_feedback():
 
     with st.expander("🎙️ 실제 통역 음성을 텍스트로 변환", expanded=False):
         st.caption("마이크로 바로 녹음하거나 기존 음성 파일을 올린 뒤 변환하세요. 음성은 저장하지 않으며 변환된 텍스트만 입력란에 반영됩니다.")
+        audio_revision = int(st.session_state.get("script_feedback_audio_revision", 0))
+        active_audio_keys = {f"script_feedback_recording_{audio_revision}", f"script_feedback_audio_upload_{audio_revision}"}
+        for key in list(st.session_state):
+            if key.startswith(("script_feedback_recording_", "script_feedback_audio_upload_")) and key not in active_audio_keys:
+                st.session_state.pop(key, None)
         record_col, upload_col = st.columns(2)
-        recorded_audio = record_col.audio_input("마이크로 녹음", key="script_feedback_recording")
+        recorded_audio = record_col.audio_input("마이크로 녹음", key=f"script_feedback_recording_{audio_revision}")
         uploaded_audio = upload_col.file_uploader(
             "음성 파일 업로드",
             type=["mp3", "mp4", "mpeg", "mpga", "m4a", "wav", "webm"],
-            key="script_feedback_audio_upload",
+            key=f"script_feedback_audio_upload_{audio_revision}",
             help="24MB 이하의 MP3, MP4, MPEG, MPGA, M4A, WAV, WEBM 파일",
         )
         audio_source = uploaded_audio or recorded_audio
@@ -1366,7 +1378,9 @@ def script_feedback():
                             target_language,
                         )
                     st.session_state["script_feedback_interpreted"] = transcript
-                    st.success("음성을 텍스트로 변환했습니다. 아래에서 오인식 부분을 확인·수정한 뒤 분석하세요.")
+                    st.session_state["script_feedback_audio_revision"] = audio_revision + 1
+                    st.session_state["script_feedback_transcribed_notice"] = True
+                    st.rerun()
                 except Exception as exc:
                     st.error(str(exc))
 
@@ -1389,7 +1403,7 @@ def script_feedback():
     if st.session_state.get("latest_script_feedback"):
         st.subheader("이번 분석 결과"); show_script_analysis(st.session_state["latest_script_feedback"])
     st.subheader("저장된 피드백")
-    feedback_items = sorted(db.all_script_feedbacks(), key=lambda item: int(item.get("id", 0)), reverse=True)[:20]
+    feedback_items = db.all_script_feedbacks(limit=20)
     for item in feedback_items:
         kind = "AI 상세 분석" if is_ai_feedback(item.get("feedback", "")) else "기존 기본 분석"
         with st.expander(f"{item['feedback_date']} · {item['interpretation_type']} {item['direction']} · {item['title']} · {kind}"):
@@ -1587,6 +1601,16 @@ def records_manager():
 pages = {"대시보드": dashboard, "통역 연습": practice, "언어쌍": language_pairs, "리뷰": review, "스크립트 피드백": script_feedback, "고유명사·전문용어 추출": terminology_extraction, "TTS": tts_page, "스크립트 복습": script_review, "공부 자료": study_materials, "공부 메모": study_notes, "통계": statistics}
 st.sidebar.title("🎧 통역 플래너")
 st.sidebar.caption(f"저장소 · {db.backend_name()}")
-selection = st.sidebar.radio("메뉴", list(pages), label_visibility="collapsed")
+selection = st.sidebar.radio("메뉴", list(pages), label_visibility="collapsed", key="main_navigation")
+previous_selection = st.session_state.get("_previous_navigation")
+if previous_selection and previous_selection != selection:
+    if previous_selection == "TTS":
+        for key in ("tts_audio", "tts_signature", "tts_target_seconds", "tts_character_count", "tts_converted_text", "tts_segment_texts", "tts_segment_count"):
+            st.session_state.pop(key, None)
+    if previous_selection == "스크립트 피드백":
+        for key in list(st.session_state):
+            if key.startswith(("script_feedback_recording_", "script_feedback_audio_upload_")):
+                st.session_state.pop(key, None)
+st.session_state["_previous_navigation"] = selection
 st.sidebar.caption("기본 루틴 · 방향별 동시통역·순차통역과 방향 없는 섀도잉 각 10분")
 pages[selection]()
