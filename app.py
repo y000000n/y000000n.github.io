@@ -891,7 +891,49 @@ def refine_extracted_terms(terms, source_text=""):
         "名誉回復", "真相究明", "特別法", "関連法", "法律", "法案", "制度", "政策", "事業", "対策", "計画",
         "経済", "問題", "事件", "被害", "支援", "補償", "賠償", "調査", "発表", "会議", "協議", "改正", "施行", "推進",
     }
-    excluded.update(generic_terms)
+    country_names_ko = {
+        "가나", "가봉", "과테말라", "그리스", "기니", "나이지리아", "남수단", "남아공", "남아프리카공화국", "네덜란드", "네팔",
+        "노르웨이", "뉴질랜드", "대한민국", "한국", "덴마크", "독일", "동티모르", "라오스", "라트비아", "러시아", "레바논",
+        "루마니아", "룩셈부르크", "르완다", "리비아", "리투아니아", "마다가스카르", "말레이시아", "멕시코", "모나코", "모로코",
+        "몰디브", "몽골", "미국", "미얀마", "바레인", "바베이도스", "방글라데시", "베네수엘라", "베트남", "벨기에", "벨라루스",
+        "볼리비아", "부탄", "북한", "조선민주주의인민공화국", "불가리아", "브라질", "브루나이", "사우디아라비아", "세네갈",
+        "세르비아", "소말리아", "수단", "스리랑카", "스웨덴", "스위스", "스페인", "슬로바키아", "슬로베니아", "시리아",
+        "싱가포르", "아랍에미리트", "아랍에미리트연합", "아르헨티나", "아이슬란드", "아이티", "아일랜드", "아제르바이잔",
+        "아프가니스탄", "알제리", "앙골라", "에스토니아", "에콰도르", "에티오피아", "영국", "예멘", "오만", "호주", "오스트레일리아",
+        "오스트리아", "온두라스", "요르단", "우간다", "우루과이", "우즈베키스탄", "우크라이나", "이라크", "이란", "이스라엘",
+        "이집트", "이탈리아", "인도", "인도네시아", "일본", "자메이카", "잠비아", "조지아", "중국", "체코", "칠레", "카자흐스탄",
+        "카타르", "캄보디아", "캐나다", "케냐", "코스타리카", "코트디부아르", "콜롬비아", "쿠바", "쿠웨이트", "크로아티아",
+        "태국", "대만", "타이완", "탄자니아", "튀르키예", "터키", "파나마", "파라과이", "파키스탄", "페루", "포르투갈",
+        "팔레스타인", "프랑스", "폴란드", "피지", "핀란드", "필리핀", "헝가리",
+    }
+    country_names_ja = {
+        "ガーナ", "ガボン", "グアテマラ", "ギリシャ", "ギニア", "ナイジェリア", "南スーダン", "南アフリカ", "南アフリカ共和国",
+        "オランダ", "ネパール", "ノルウェー", "ニュージーランド", "大韓民国", "韓国", "デンマーク", "ドイツ", "東ティモール",
+        "ラオス", "ラトビア", "ロシア", "レバノン", "ルーマニア", "ルクセンブルク", "ルワンダ", "リビア", "リトアニア",
+        "マダガスカル", "マレーシア", "メキシコ", "モナコ", "モロッコ", "モルディブ", "モンゴル", "アメリカ", "米国", "ミャンマー",
+        "バーレーン", "バルバドス", "バングラデシュ", "ベネズエラ", "ベトナム", "ベルギー", "ベラルーシ", "ボリビア", "ブータン",
+        "北朝鮮", "朝鮮民主主義人民共和国", "ブルガリア", "ブラジル", "ブルネイ", "サウジアラビア", "セネガル", "セルビア",
+        "ソマリア", "スーダン", "スリランカ", "スウェーデン", "スイス", "スペイン", "スロバキア", "スロベニア", "シリア",
+        "シンガポール", "アラブ首長国連邦", "UAE", "アルゼンチン", "アイスランド", "ハイチ", "アイルランド", "アゼルバイジャン",
+        "アフガニスタン", "アルジェリア", "アンゴラ", "エストニア", "エクアドル", "エチオピア", "イギリス", "英国", "イエメン",
+        "オマーン", "オーストラリア", "豪州", "オーストリア", "ホンジュラス", "ヨルダン", "ウガンダ", "ウルグアイ",
+        "ウズベキスタン", "ウクライナ", "イラク", "イラン", "イスラエル", "エジプト", "イタリア", "インド", "インドネシア",
+        "日本", "ジャマイカ", "ザンビア", "ジョージア", "中国", "チェコ", "チリ", "カザフスタン", "カタール", "カンボジア",
+        "カナダ", "ケニア", "コスタリカ", "コートジボワール", "コロンビア", "キューバ", "クウェート", "クロアチア", "タイ",
+        "台湾", "タンザニア", "トルコ", "テュルキエ", "パナマ", "パラグアイ", "パキスタン", "ペルー", "ポルトガル",
+        "パレスチナ", "フランス", "ポーランド", "フィジー", "フィンランド", "フィリピン", "ハンガリー",
+    }
+    famous_places = {
+        "서울", "서울특별시", "도쿄", "동경", "뉴욕", "뉴욕시", "워싱턴", "워싱턴dc", "워싱턴디시", "런던", "파리", "베를린",
+        "베이징", "북경", "상하이", "홍콩", "마카오", "타이베이", "방콕", "싱가포르시", "모스크바", "로마", "마드리드",
+        "브뤼셀", "제네바", "빈", "비엔나", "시드니", "캔버라", "오타와", "멕시코시티", "두바이", "아부다비", "카이로",
+        "뉴델리", "델리", "자카르타", "하노이", "호찌민", "마닐라", "평양", "부산", "오사카", "교토", "요코하마",
+        "ソウル", "ソウル特別市", "東京", "ニューヨーク", "ニューヨーク市", "ワシントン", "ワシントンDC", "ロンドン", "パリ",
+        "ベルリン", "北京", "上海", "香港", "マカオ", "台北", "バンコク", "モスクワ", "ローマ", "マドリード", "ブリュッセル",
+        "ジュネーブ", "ウィーン", "シドニー", "キャンベラ", "オタワ", "メキシコシティ", "ドバイ", "アブダビ", "カイロ",
+        "ニューデリー", "デリー", "ジャカルタ", "ハノイ", "ホーチミン", "マニラ", "平壌", "釜山", "大阪", "京都", "横浜",
+    }
+    excluded.update(generic_terms | country_names_ko | country_names_ja | famous_places)
     excluded = {_normalize_extracted_term(value) for value in excluded}
     explicit_leader_exclusions = (
         ("이재명", ("대통령", "大統領")), ("李在明", ("대통령", "大統領")),
@@ -934,6 +976,9 @@ def extract_terms_ai(text):
     instructions = """입력 텍스트에서 한일·일한 통역 준비에 실제로 필요한 항목만 추출한다. 아래 판단 순서를 반드시 따른다.
 
 1. 우선 제외:
+- 국가명은 통역 준비 용어로 추출하지 않는다. 한국어·일본어의 정식 국명, 통칭, 약칭을 모두 제외한다. 예: 대한민국·한국·미국·일본·중국·북한·조선민주주의인민공화국·대만·韓国・米国・日本・中国・北朝鮮・台湾.
+- 서울·도쿄·뉴욕·워싱턴·런던·파리·베이징처럼 널리 알려진 수도·대도시·기초 지명은 추출하지 않는다.
+- 단, 국가명이나 유명 지명이 포함된 정식 조직명·법률명·협정명·사업명은 전체 명칭으로서 별도의 추출 가치가 있으면 보존한다. 국가명이나 지명만 따로 떼어 출력하지 않는다.
 - 청와대, 행정안전부, 기획재정부, 산업통상자원부, 후생성 등 한국·일본 및 기타 국가의 정부부처·대통령실과 그 약칭은 추출하지 않는다.
 - 정부부처명에 '장관' 또는 '대신'이라는 직책만 붙고 사람 이름이 없으면 추출하지 않는다.
 - 한국과 일본의 대통령·총리는 사람 이름이 함께 있어도 추출하지 않는다. 현직·전직을 모두 포함한다. 예: '이재명 대통령', '다카이치 사나에 총리'는 제외한다.
@@ -975,7 +1020,8 @@ def extract_terms_ai(text):
 4. 조직명이 인명·소속·직책 결합 표현 안에 들어 있어도 조직명 자체를 별도 항목으로 유지한다.
 5. '정부', '위원회', '기업' 같은 일반명사만 단독으로 추출하지 않는다. 정식 고유명칭만 포함한다.
 6. 한국·일본 대통령·총리와 이름 없는 정부부처+장관, 기초 시사용어는 기존 제외 규칙대로 제외한다.
-7. term은 원문에 실제로 존재하는 연속 문자열을 그대로 복사한다. 번역·분류·문맥·최초 위치를 완성한다.
+7. 국가명과 서울·도쿄·뉴욕·워싱턴 같은 유명 지명은 제외한다. 단, 그 명칭이 포함된 정식 조직명·법률명·협정명은 전체 고유명칭으로 보존할 수 있다.
+8. term은 원문에 실제로 존재하는 연속 문자열을 그대로 복사한다. 번역·분류·문맥·최초 위치를 완성한다.
 
 출력은 누락과 잘못된 분리를 모두 바로잡은 완전한 최종 목록이어야 한다."""
     audit_input = f"[원문]\n{text}\n\n[1차 추출 결과]\n{json.dumps(initial, ensure_ascii=False)}"
@@ -995,6 +1041,8 @@ def terminology_extraction():
         st.session_state["extracted_terms_ready"] = False
         st.session_state["extracted_terms"] = []
         st.session_state["extracted_article"] = None
+        st.session_state.pop("extracted_terms_before_delete", None)
+        st.session_state["terminology_delete_revision"] = int(st.session_state.get("terminology_delete_revision", 0)) + 1
         if not article_url.strip() and not text.strip(): st.error("신문기사 URL 또는 분석할 텍스트를 입력해주세요.")
         else:
             try:
@@ -1020,10 +1068,45 @@ def terminology_extraction():
             st.caption(f"기사: {article.get('title') or '제목을 찾지 못함'} · 본문 {len(article.get('text','')):,}자")
             with st.expander("수집한 기사 본문 확인"):
                 st.text(article.get("text", ""))
-        shown = [{"번호":i, "원문 용어":item["term"], "번역":item["translation"], "번역 언어":item["translation_language"], "구분":item["category"], "세부 분류":item["subtype"], "문맥·의미":item["context"]} for i,item in enumerate(terms, 1)]
-        st.dataframe(shown, use_container_width=True, hide_index=True)
+        shown = [{"삭제 선택":False, "번호":i, "원문 용어":item["term"], "번역":item["translation"], "번역 언어":item["translation_language"], "구분":item["category"], "세부 분류":item["subtype"], "문맥·의미":item["context"]} for i,item in enumerate(terms, 1)]
+        edited_terms = st.data_editor(
+            shown,
+            use_container_width=True,
+            hide_index=True,
+            num_rows="fixed",
+            disabled=["번호", "원문 용어", "번역", "번역 언어", "구분", "세부 분류", "문맥·의미"],
+            column_config={"삭제 선택": st.column_config.CheckboxColumn("삭제 선택", help="필요 없는 항목에 체크하세요.")},
+            key=f"terminology_delete_editor_{st.session_state.get('terminology_delete_revision', 0)}",
+        )
+        edited_records = edited_terms.to_dict("records") if hasattr(edited_terms, "to_dict") else edited_terms
+        selected_numbers = {int(row["번호"]) for row in edited_records if row.get("삭제 선택")}
+        delete_col, undo_col = st.columns([3, 1])
+        if delete_col.button(
+            f"선택한 항목 삭제 ({len(selected_numbers)}개)",
+            type="secondary",
+            use_container_width=True,
+            disabled=not selected_numbers,
+            key="terminology_delete_selected",
+        ):
+            st.session_state["extracted_terms_before_delete"] = list(terms)
+            st.session_state["extracted_terms"] = [item for number, item in enumerate(terms, 1) if number not in selected_numbers]
+            st.session_state["terminology_delete_revision"] = int(st.session_state.get("terminology_delete_revision", 0)) + 1
+            st.rerun()
+        if undo_col.button(
+            "삭제 취소",
+            use_container_width=True,
+            disabled=not bool(st.session_state.get("extracted_terms_before_delete")),
+            key="terminology_undo_delete",
+        ):
+            st.session_state["extracted_terms"] = st.session_state.pop("extracted_terms_before_delete")
+            st.session_state["terminology_delete_revision"] = int(st.session_state.get("terminology_delete_revision", 0)) + 1
+            st.rerun()
     elif st.session_state.get("extracted_terms_ready"):
         st.info("설정한 기준에 해당하는 고유명사나 전문용어를 찾지 못했습니다.")
+        if st.session_state.get("extracted_terms_before_delete") and st.button("방금 삭제한 항목 되돌리기", key="terminology_undo_empty"):
+            st.session_state["extracted_terms"] = st.session_state.pop("extracted_terms_before_delete")
+            st.session_state["terminology_delete_revision"] = int(st.session_state.get("terminology_delete_revision", 0)) + 1
+            st.rerun()
 
 
 def tts_target_duration(text, language):
