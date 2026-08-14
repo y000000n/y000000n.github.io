@@ -13,6 +13,7 @@ import socket
 import ssl
 import uuid
 from pathlib import Path
+from zoneinfo import ZoneInfo
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
@@ -224,16 +225,8 @@ def dashboard():
             row[f"{day.strftime('%m/%d')}\n{'월화수목금토일'[day.weekday()]}"] = count
         table.append(row)
     st.dataframe(table, use_container_width=True, hide_index=True)
-    st.subheader("최근 공부 메모")
-    recent_notes = db.recent_notes(3)
-    if recent_notes:
-        for note in recent_notes:
-            with st.container(border=True):
-                st.markdown(f"**{note['title']}** · {note['note_date']}")
-                st.write(note["content"])
-                if note["tags"]: st.caption(f"#{note['tags'].replace(',', ' #')}")
-    else:
-        st.caption("아직 작성한 메모가 없습니다. Study Notes에서 첫 메모를 남겨보세요.")
+    st.subheader("오늘의 할 일")
+    dashboard_todos()
     st.subheader("이번 주 방향별 진행")
     for direction, key in [("KO→JA", "weekly_ko_ja_goal"), ("JA→KO", "weekly_ja_ko_goal")]:
         goal = int(settings[key]); current = mins.get(direction, 0)
@@ -391,32 +384,61 @@ def review():
                 st.session_state.revealed=False; st.rerun()
 
 
-def study_notes():
-    hero("공부 메모", "수업, 연습, 피드백에서 얻은 공부 메모를 모아보세요.")
-    with st.form("study_note", clear_on_submit=True):
-        a, b = st.columns([1, 2])
-        note_date = a.date_input("날짜", date.today())
-        title = b.text_input("제목 *", placeholder="예: 숫자 통역 시 주의점")
-        content = st.text_area("메모 내용 *", height=180, placeholder="배운 점, 개선할 점, 다음 연습에서 적용할 내용을 기록하세요.")
-        tags = st.text_input("태그", placeholder="숫자, 피드백, 시험전략 (쉼표로 구분)")
-        if st.form_submit_button("메모 저장", type="primary"):
-            if not title.strip() or not content.strip():
-                st.error("제목과 메모 내용을 모두 입력해주세요.")
-            else:
-                db.add_note({"note_date": note_date.isoformat(), "title": title.strip(), "content": content.strip(), "tags": tags.strip()})
-                st.success("공부 메모를 저장했습니다.")
-    st.subheader("메모 모아보기")
-    keyword = st.text_input("메모 검색", placeholder="제목·내용·태그 검색")
-    notes = db.find_notes(keyword)
-    if notes:
-        for note in notes:
-            with st.expander(f"{note['note_date']} · {note['title']}"):
-                st.write(note["content"])
-                if note["tags"]: st.caption(f"태그: {note['tags']}")
-        st.markdown("#### 기록 수정")
-        selected_record_editor("study_notes", notes, [("note_date","날짜"),("title","제목"),("content","내용"),("tags","태그")], lambda r: f"{r['note_date']} · {r['title']}", "note")
-    else:
-        st.info("조건에 맞는 메모가 없습니다.")
+SEOUL_TIMEZONE = ZoneInfo("Asia/Seoul")
+
+
+def seoul_today():
+    return datetime.now(SEOUL_TIMEZONE).date()
+
+
+def render_daily_todos(prefix: str, allow_add: bool) -> None:
+    today = seoul_today().isoformat()
+    if allow_add:
+        with st.form(f"{prefix}_todo_form", clear_on_submit=True):
+            content = st.text_input("할 일", placeholder="오늘 할 일을 입력하세요", label_visibility="collapsed")
+            if st.form_submit_button("추가", type="primary", use_container_width=True):
+                if not content.strip():
+                    st.error("할 일을 입력해주세요.")
+                else:
+                    db.add_todo(content.strip(), today)
+                    st.rerun(scope="fragment")
+
+    todos = db.todos_for_date(today)
+    if not todos:
+        st.caption("오늘 등록한 할 일이 없습니다.")
+        return
+    completed_count = sum(bool(item.get("completed")) for item in todos)
+    st.caption(f"{completed_count}/{len(todos)}개 완료")
+    st.progress(completed_count / len(todos))
+    for item in todos:
+        check_col, delete_col = st.columns([12, 1])
+        completed = check_col.checkbox(
+            item["content"],
+            value=bool(item.get("completed")),
+            key=f"{prefix}_todo_{item['id']}_{int(bool(item.get('completed')))}",
+        )
+        if completed != bool(item.get("completed")):
+            db.set_todo_completed(item["id"], completed)
+            st.rerun(scope="fragment")
+        if delete_col.button("삭제", key=f"{prefix}_todo_delete_{item['id']}", type="tertiary"):
+            db.delete_todo(item["id"])
+            st.rerun(scope="fragment")
+
+
+@st.fragment(run_every="30s")
+def dashboard_todos():
+    render_daily_todos("dashboard", allow_add=False)
+
+
+@st.fragment(run_every="30s")
+def todo_panel():
+    render_daily_todos("menu", allow_add=True)
+
+
+def todo_list():
+    hero("할 일", "오늘 해야 할 일을 기록하고 완료 여부를 확인하세요.")
+    st.caption("한국 시간 자정이 지나면 새 날짜의 빈 목록으로 자동 전환됩니다.")
+    todo_panel()
 
 
 def analyze_scripts(source: str, interpreted: str) -> str:
@@ -1669,7 +1691,6 @@ def records_manager():
     specs = [
         ("연습", "practices", "id", {"practice_date":"날짜","activity_type":"유형","direction":"방향","title":"자료 제목","topic":"주제","source_url":"URL","video_speed":"속도","minutes":"분","difficulty":"난이도","omission":"내용 누락","number_omission":"숫자 누락","logic_error":"논리 오류","expression_block":"표현 막힘","unnatural_expression":"부자연스러운 표현","other_notes":"메모"}),
         ("언어쌍", "language_pairs", "id", {"important":"중요","korean":"한국어","japanese":"일본어","source":"출처","notes":"메모","mastery":"숙지도"}),
-        ("공부 메모", "study_notes", "id", {"note_date":"날짜","title":"제목","content":"내용","tags":"태그"}),
         ("스크립트 피드백", "script_feedbacks", "id", {"feedback_date":"날짜","interpretation_type":"통역 유형","direction":"방향","title":"제목","source_script":"대상 스크립트","interpreted_script":"실제 통역 스크립트","feedback":"피드백"}),
         ("목표 설정", "settings", "key", {"value":"설정값"}),
     ]
@@ -1700,7 +1721,7 @@ def records_manager():
                 st.rerun()
 
 
-pages = {"대시보드": dashboard, "통역 연습": practice, "언어쌍": language_pairs, "리뷰": review, "스크립트 피드백": script_feedback, "고유명사·전문용어 추출": terminology_extraction, "TTS": tts_page, "스크립트 복습": script_review, "공부 자료": study_materials, "공부 메모": study_notes, "통계": statistics}
+pages = {"대시보드": dashboard, "통역 연습": practice, "언어쌍": language_pairs, "리뷰": review, "스크립트 피드백": script_feedback, "고유명사·전문용어 추출": terminology_extraction, "TTS": tts_page, "스크립트 복습": script_review, "공부 자료": study_materials, "할 일": todo_list, "통계": statistics}
 st.sidebar.title("🎧 통역 플래너")
 st.sidebar.caption(f"저장소 · {db.backend_name()}")
 selection = st.sidebar.radio("메뉴", list(pages), label_visibility="collapsed", key="main_navigation")

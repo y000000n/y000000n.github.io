@@ -55,6 +55,7 @@ class _RestTable:
     def insert(self, payload): self.method, self.payload = "POST", payload; self.headers["Prefer"] = "return=representation"; return self
     def upsert(self, payload): self.method, self.payload = "POST", payload; self.headers["Prefer"] = "return=representation,resolution=merge-duplicates"; return self
     def update(self, payload): self.method, self.payload = "PATCH", payload; self.headers["Prefer"] = "return=representation"; return self
+    def delete(self): self.method, self.payload = "DELETE", None; self.headers["Prefer"] = "return=representation"; return self
     def eq(self, column, value): self.params.append((column, f"eq.{value}")); return self
     def gte(self, column, value): self.params.append((column, f"gte.{value}")); return self
     def lte(self, column, value): self.params.append((column, f"lte.{value}")); return self
@@ -178,6 +179,13 @@ def init_db(db_path: Path | str = DB_PATH) -> None:
                 tags TEXT DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS todos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                todo_date TEXT NOT NULL,
+                content TEXT NOT NULL,
+                completed INTEGER NOT NULL DEFAULT 0 CHECK(completed IN (0,1)),
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
             CREATE TABLE IF NOT EXISTS script_feedbacks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -312,6 +320,40 @@ def add_note(values: dict, db_path: Path | str = DB_PATH) -> int:
         (values["note_date"], values["title"], values["content"], values.get("tags", "")),
         db_path,
     )
+
+
+def add_todo(content: str, todo_date: str, db_path: Path | str = DB_PATH) -> int:
+    payload = {"todo_date": todo_date, "content": content, "completed": False}
+    remote = _remote_client()
+    if remote:
+        return remote.table("todos").insert(payload).execute().data[0]["id"]
+    return execute(
+        "INSERT INTO todos(todo_date,content,completed) VALUES(?,?,0)",
+        (todo_date, content), db_path,
+    )
+
+
+def todos_for_date(todo_date: str, db_path: Path | str = DB_PATH):
+    remote = _remote_client()
+    if remote:
+        return remote.table("todos").select("*").eq("todo_date", todo_date).order("id").execute().data
+    return query("SELECT * FROM todos WHERE todo_date=? ORDER BY id", (todo_date,), db_path)
+
+
+def set_todo_completed(todo_id: int, completed: bool, db_path: Path | str = DB_PATH) -> None:
+    remote = _remote_client()
+    if remote:
+        remote.table("todos").update({"completed": bool(completed)}).eq("id", todo_id).execute()
+        return
+    execute("UPDATE todos SET completed=? WHERE id=?", (int(bool(completed)), todo_id), db_path)
+
+
+def delete_todo(todo_id: int, db_path: Path | str = DB_PATH) -> None:
+    remote = _remote_client()
+    if remote:
+        remote.table("todos").delete().eq("id", todo_id).execute()
+        return
+    execute("DELETE FROM todos WHERE id=?", (todo_id,), db_path)
 
 
 def add_script_feedback(values: dict, db_path: Path | str = DB_PATH) -> int:
@@ -488,6 +530,7 @@ EDITABLE_COLUMNS = {
     "practices": {"practice_date","activity_type","direction","title","topic","source_url","video_speed","minutes","difficulty","omission","number_omission","logic_error","expression_block","unnatural_expression","other_notes"},
     "language_pairs": {"korean","japanese","pair_type","source","notes","important","mastery"},
     "study_notes": {"note_date","title","content","tags"},
+    "todos": {"todo_date","content","completed"},
     "script_feedbacks": {"feedback_date","interpretation_type","direction","title","source_script","interpreted_script","feedback"},
     "study_materials": {"title","content_html","language_direction","interpretation_mode"},
     "script_reviews": {"title","script_text","highlights"},
